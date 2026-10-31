@@ -4,7 +4,10 @@
   const CFG = window.CHECKMYIP_CONFIG || {};
   const $ = (s, r = document) => r.querySelector(s);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const icon = (id) => `<svg viewBox="0 0 24 24"><use href="/assets/icons.svg#${id}"/></svg>`;
+  // 资源版本号由 scripts/stamp-assets.mjs 写入 index.html 的 meta，用于刷新图标缓存
+  const ASSET_V = document.querySelector('meta[name="checkmyip-asset-version"]')?.content;
+  const ICONS = '/assets/icons.svg' + (ASSET_V ? `?v=${ASSET_V}` : '');
+  const icon = (id) => `<svg viewBox="0 0 24 24"><use href="${ICONS}#${id}"/></svg>`;
   const LEVEL_ICON = { good: 'ok', warn: 'warn', bad: 'bad', info: 'info' };
   const TYPE_CLASS = { residential: 'good', mobile: 'teal', business: 'warn', edu: 'purple', datacenter: 'bad', proxy: 'bad', unknown: 'soft' };
   const RISK_CLASS = { low: 'good', medium: 'warn', high: 'bad' };
@@ -48,6 +51,7 @@
 
   function renderIp(d) {
     state.view = d;
+    renderSharing();
     const a = d.analysis, l = d.location, n = d.network;
     const mine = d.query === 'self';
     $('#ipEyebrow').textContent = mine ? '本站看到的你的 IP' : '查询的 IP';
@@ -132,6 +136,9 @@
     $('#signals').innerHTML = '';
     $('#scoreNum').textContent = '--'; $('#scoreLabel').textContent = '无法评分';
     $('#gaugeBar').setAttribute('stroke-dasharray', '0 100');
+    state.view = null;
+    $('#shHeadline').textContent = '无法估算'; $('#shHeadline').className = 'sh-headline soft';
+    $('#shScene').textContent = ''; $('#shBadges').innerHTML = ''; $('#shReasons').innerHTML = ''; $('#shEvidence').hidden = true;
   }
 
   function setLoading() {
@@ -139,6 +146,8 @@
     $('#ipBadges').innerHTML = '<span class="badge skel">加载中</span>';
     $('#signals').innerHTML = '<li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li>';
     $('#scoreLabel').textContent = '计算中';
+    $('#shHeadline').className = 'sh-headline skel';
+    $('#shReasons').innerHTML = '<li class="skel-row"></li><li class="skel-row"></li>';
   }
 
   function animateNum(el, to) {
@@ -168,7 +177,7 @@
       history.replaceState(null, '', u);
     } catch (e) { renderIpError(e.message); }
   }
-  async function loadSelf() { state.self = await api(); renderEnv(); renderStack(); checkRtc(); return state.self; }
+  async function loadSelf() { state.self = await api(); renderEnv(); renderStack(); checkRtc(); reportSeen(); return state.self; }
 
   $('#searchForm').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -183,7 +192,9 @@
   });
 
   // ---------- IPv4 / IPv6 ----------
-  async function probe(urls) {
+  // 依次尝试各探测地址；返回了错误地址族（如 v4 子域其实是双栈、走了 IPv6）就继续下一个
+  const familyOk = (ip, family) => (family === 6 ? ip.includes(':') : !ip.includes(':'));
+  async function probe(urls, family) {
     for (const u of urls || []) {
       try {
         const r = await fetch(u, { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined, cache: 'no-store' });
@@ -191,15 +202,17 @@
         const t = (await r.text()).trim();
         let ip = t;
         if (t.startsWith('{')) { try { ip = JSON.parse(t).ip; } catch (e) { continue; } }
-        if (ip && /^[0-9a-f.:]+$/i.test(ip)) return ip;
+        if (!ip || !/^[0-9a-f.:]+$/i.test(ip)) continue;
+        if (family && !familyOk(ip, family)) continue;
+        return ip;
       } catch (e) { /* 下一个 */ }
     }
     return null;
   }
   function detectStack() {
-    const done = () => { renderStack(); renderEnv(); renderRtc(); };
-    probe(CFG.ipv4).then((ip) => { state.v4 = ip && !ip.includes(':') ? ip : null; done(); });
-    probe(CFG.ipv6).then((ip) => { state.v6 = ip && ip.includes(':') ? ip : null; done(); });
+    const done = () => { renderStack(); renderEnv(); renderRtc(); renderSharing(); };
+    probe(CFG.ipv4, 4).then((ip) => { state.v4 = ip; done(); });
+    probe(CFG.ipv6, 6).then((ip) => { state.v6 = ip; done(); });
   }
   function renderStack() {
     const seen = state.self?.ip;
@@ -269,7 +282,7 @@
     try { state.rtc = await window.CMIWebRTC.run(CFG.stunServers || ['stun:stun.cloudflare.com:3478', 'stun:stun.miwifi.com:3478']); }
     catch (e) { state.rtc = { supported: false, candidates: [], error: String(e) }; }
     rtcRunning = false; btn.disabled = false;
-    renderRtc(); renderEnv();
+    renderRtc(); renderEnv(); renderSharing();
   }
   $('#rtcBtn').addEventListener('click', checkRtc);
 
@@ -321,11 +334,83 @@
     $('#fpHash').textContent = f.hash;
   }
 
+
+  // ---------- 预估多少人在用这个 IP ----------
+  const SHARE_CLASS = { household: 'good', residential: 'good', cn_broadband: 'warn', cgnat_mobile: 'teal', nat_large: 'purple', nat_org: 'warn', public_proxy: 'bad', server: 'soft', unknown: 'soft' };
+  const CONF_CLASS = { high: 'good', medium: 'blue', low: 'soft' };
+  const isV4 = (ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip || '');
+  const inCgnat = (ip) => { if (!isV4(ip)) return false; const [a, b] = ip.split('.').map(Number); return a === 100 && b >= 64 && b <= 127; };
+
+  // 客户端证据（只对你自己的 IP 有意义）：WebRTC 本地候选在 100.64.0.0/10；同一时刻看到多个公网 IPv4
+  function cgnatEvidence() {
+    const out = [];
+    const r = state.rtc;
+    if (r && r.candidates) {
+      const cg = [...new Set(r.candidates.filter((c) => inCgnat(c.address)).map((c) => c.address))];
+      if (cg.length) out.push({ level: 'warn', strong: 'cgnat', title: `WebRTC 发现 ${cg.join('、')}`, text: '这是运营商级 NAT 专用地址段（100.64.0.0/10），说明本机直接处在运营商 NAT 后面（例外：Tailscale 等组网软件也使用这一段）。' });
+    }
+    const pubs = new Set();
+    if (isV4(state.v4)) pubs.add(state.v4);
+    if (isV4(state.self?.ip)) pubs.add(state.self.ip);
+    if (r && r.candidates) r.candidates.filter((c) => c.kind === 'public' && isV4(c.address)).forEach((c) => pubs.add(c.address));
+    if (pubs.size > 1) out.push({ level: 'warn', strong: 'multi', title: '同一时刻出现多个公网 IPv4', text: `IPv4 探测、本站与 WebRTC 看到的公网 IPv4 不一致：${[...pubs].join('、')}。运营商级 NAT 常用一组出口 IP 轮换；使用代理 / VPN 分流时也会这样。` });
+    if (r && r.supported && !out.length) out.push({ level: 'info', title: '未发现 CGNAT 迹象', text: 'WebRTC 未出现 100.64.x.x 地址，各处看到的公网 IPv4 也一致。但若 100.64.x.x 只出现在路由器 WAN 口，浏览器看不到，因此不能排除。' });
+    return out;
+  }
+
+  function renderSharing() {
+    const d = state.view;
+    if (!d || !d.sharing) return;
+    const s = d.sharing, mine = d.query === 'self';
+    const hl = $('#shHeadline');
+    hl.textContent = s.headline; hl.className = 'sh-headline ' + (SHARE_CLASS[s.kind] || 'soft');
+    $('#shScene').textContent = s.scene || '';
+    $('#shBadges').innerHTML = `<span class="badge ${CONF_CLASS[s.confidence] || 'soft'}">置信度 ${esc(s.confidenceText)}</span><span class="badge soft">仅为估算</span>`;
+    const ev = mine ? cgnatEvidence() : [];
+    const items = s.reasons.map((t) => ({ level: 'info', text: t })).concat(ev);
+    $('#shReasons').innerHTML = items.map((c) => `<li class="${c.level}"><span class="ck">${icon(LEVEL_ICON[c.level])}</span><div>${c.title ? `<b>${esc(c.title)}</b><p>${esc(c.text)}</p>` : `<span>${esc(c.text)}</span>`}</div></li>`).join('');
+    // 100.64/10 是直接证据；多个公网 IPv4 只是间接迹象（也可能是代理分流 / 多出口），措辞要区分
+    const hasCgnat = ev.some((x) => x.strong === 'cgnat'), hasMulti = ev.some((x) => x.strong === 'multi');
+    const sharedKind = ['cgnat_mobile', 'public_proxy', 'nat_large'].includes(s.kind);
+    const evEl = $('#shEvidence');
+    let evText = '';
+    if (hasCgnat) evText = sharedKind ? '本机证据也支持：你处在运营商级 NAT 后面。' : '结合本机证据：WebRTC 看到了 100.64.x.x，你很可能处在运营商级 NAT 后面，这个 IP 可能被多户共用。';
+    else if (hasMulti) evText = '结合本机证据：你同时有多个公网 IPv4，可能是运营商 NAT 轮换出口，也可能是代理 / VPN 分流或多出口网络。';
+    evEl.hidden = !evText; evEl.className = 'sh-evidence'; evEl.textContent = evText;
+    renderObserved(s.observed, d);
+  }
+
+  function renderObserved(o, d) {
+    const box = $('#shStats'), note = $('#shObsNote');
+    const tiles = (a, b) => `<div><b>${a}</b><span>近 30 天</span></div><div><b>${b}</b><span>近 7 天</span></div>`;
+    if (!o || !o.shown) { box.className = 'sh-stats off'; box.innerHTML = tiles('—', '—'); note.textContent = (o && o.message) || '本站观测数只对你自己的 IP 显示。'; return; }
+    if (!o.enabled) { box.className = 'sh-stats off'; box.innerHTML = tiles('未启用', '未启用'); note.textContent = '本站统计未启用' + (o.reason === 'db_error' ? '（暂时不可用）' : '') + '，只显示上面的类型估算。'; return; }
+    box.className = 'sh-stats'; box.innerHTML = tiles(o.devices30d, o.devices7d);
+    const scope = o.scope === '/64' ? `你所在的 IPv6 /64 网段` : `IP ${d.ip}`;
+    note.textContent = `近 30 天在 ${scope} 上访问过本站的不同浏览器（按指纹去重${o.includesYou ? '，含你自己' : ''}）。只代表本站访客，实际使用人数可能更多。${o.notCounted || ''}`;
+  }
+
+  // 把指纹哈希报告给 /api/seen（同源、每页面一次；服务端只存加盐哈希、按天去重）
+  let seenSent = false;
+  async function reportSeen() {
+    if (seenSent || !state.self || !state.fp || !state.fp.hash) return;
+    seenSent = true;
+    try {
+      const r = await fetch('/api/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fp: state.fp.hash }) });
+      const j = await r.json().catch(() => null);
+      if (!j || !state.self.sharing) return;
+      if (r.ok && j.observed) state.self.sharing.observed = { ...j.observed, includesYou: true };
+      else if (r.status === 429 && state.self.sharing.observed) state.self.sharing.observed = { ...state.self.sharing.observed, notCounted: '本次访问未计入（上报过于频繁，稍后刷新即可）。' };
+      else if (j.enabled === false) state.self.sharing.observed = { shown: true, enabled: false, reason: j.reason, message: j.message };
+      if (state.view === state.self) renderSharing();
+    } catch (e) { /* 统计失败不影响页面 */ }
+  }
+
   // ---------- 启动 ----------
   (async function init() {
     const q = new URLSearchParams(location.search).get('ip');
     if (q) $('#searchInput').value = q;
-    window.CMIFingerprint.collect().then((f) => { state.fp = f; renderFp(f); renderEnv(); });
+    window.CMIFingerprint.collect().then((f) => { state.fp = f; renderFp(f); renderEnv(); reportSeen(); });
     detectStack();
     try {
       await loadSelf();

@@ -7,11 +7,15 @@
   const SITE_DOMAIN = ''; // TODO: 部署者确定域名后填写
 
   const own = SITE_DOMAIN && !/example\.com$/.test(SITE_DOMAIN);
+  // 每个探测按顺序尝试：返回了错误地址族（例如 v4 子域被解析成 IPv6）就继续下一个，
+  // ip.sb 的单栈接口永远作为最后的兜底。
+  const IPSB_V4 = 'https://api-ipv4.ip.sb/ip';
+  const IPSB_V6 = 'https://api-ipv6.ip.sb/ip';
   window.CHECKMYIP_CONFIG = {
     siteDomain: own ? SITE_DOMAIN : null,
     // 返回纯文本 IP 或含 ip 字段的 JSON 均可；需允许跨域（CORS）
-    ipv4: own ? [`https://v4.${SITE_DOMAIN}/api/ip`] : ['https://api-ipv4.ip.sb/ip'],
-    ipv6: own ? [`https://v6.${SITE_DOMAIN}/api/ip`] : ['https://api-ipv6.ip.sb/ip'],
+    ipv4: own ? [`https://v4.${SITE_DOMAIN}/api/ip`, IPSB_V4] : [IPSB_V4],
+    ipv6: own ? [`https://v6.${SITE_DOMAIN}/api/ip`, IPSB_V6] : [IPSB_V6],
     stunServers: ['stun:stun.cloudflare.com:3478', 'stun:stun.miwifi.com:3478'],
   };
 })();

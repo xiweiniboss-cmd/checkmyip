@@ -10,6 +10,7 @@ const DEFAULT = [
   ['120.204.0.1', '中国移动'], ['73.0.0.1', 'Comcast'], ['5.9.0.1', 'Hetzner'], ['2001:4860:4860::8888', 'Google v6'],
   // 嵌套 / 重叠段（旧实现只回扫 64 段会漏检）
   ['34.190.0.1', 'Google 34.128.0.0/10'], ['34.183.219.127', 'Google /10 内，旧版漏检'], ['34.186.0.1', 'GCP 段嵌套在 Google /10 内'],
+  ['9.9.9.9', 'Quad9 DNS'],
 ];
 let list = args.length ? args.map((a) => [a, '']) : DEFAULT;
 if (!args.length) {
@@ -20,7 +21,16 @@ const rows = [];
 for (const [ip, note] of list) {
   const t0 = Date.now();
   try {
-    const r = await fetch(`${base}/api/ip?ip=${encodeURIComponent(ip)}`, { signal: AbortSignal.timeout(30000) });
+    // ?ip= 默认限流 20 次/分钟：遇到 429 按 retry-after 等待后重试（最多 3 次）
+    let r;
+    for (let i = 0; i < 4; i++) {
+      r = await fetch(`${base}/api/ip?ip=${encodeURIComponent(ip)}`, { signal: AbortSignal.timeout(30000) });
+      if (r.status !== 429 || i === 3) break;
+      const wait = Math.min(Number(r.headers.get('retry-after')) || 60, 65);
+      console.error(`… ${ip} 被限流（429），${wait}s 后重试`);
+      await r.body?.cancel();
+      await new Promise((ok) => setTimeout(ok, wait * 1000));
+    }
     const d = await r.json();
     if (!d.ok) { rows.push({ ip, note, error: d.message }); continue; }
     const a = d.analysis;
@@ -28,10 +38,10 @@ for (const [ip, note] of list) {
       loc: [d.location.countryCode, d.location.region].filter(Boolean).join('/'), type: a.typeText, conf: a.confidenceText, score: a.score, risk: a.riskText,
       cloud: d.network.cloudProvider.join('+') || '-', inc: a.incomplete ? '是' : '否',
       signals: a.signals.filter((s) => s.effect).map((s) => `${s.name}${s.effect > 0 ? '+' : ''}${s.effect}`).join('; ') || '-',
-      geo: d.sources.geo, ptr: d.network.ptr || '-', ms: Date.now() - t0 });
+      geo: d.sources.geo, ptr: d.network.ptr || '-', share: d.sharing ? `${d.sharing.label}（${d.sharing.confidenceText}）` : '-', ms: Date.now() - t0 });
   } catch (e) { rows.push({ ip, note, error: String(e.message || e) }); }
 }
-console.log('| IP | 备注 | ASN | 组织 | 位置 | 云厂商段 | 类型 | 置信度 | 分数 | 风险 | 不完整 | 主要信号 | PTR | 地理来源 | ms |');
-console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+console.log('| IP | 备注 | ASN | 组织 | 位置 | 云厂商段 | 类型 | 置信度 | 分数 | 风险 | 不完整 | 预估共用人数 | 主要信号 | PTR | 地理来源 | ms |');
+console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 for (const r of rows) console.log(r.error ? `| ${r.ip} | ${r.note} | 错误：${r.error} |` :
-  `| ${r.ip} | ${r.note} | ${r.asn} | ${r.org} | ${r.loc} | ${r.cloud} | ${r.type} | ${r.conf} | ${r.score} | ${r.risk} | ${r.inc} | ${r.signals} | ${r.ptr} | ${r.geo} | ${r.ms} |`);
+  `| ${r.ip} | ${r.note} | ${r.asn} | ${r.org} | ${r.loc} | ${r.cloud} | ${r.type} | ${r.conf} | ${r.score} | ${r.risk} | ${r.inc} | ${r.share} | ${r.signals} | ${r.ptr} | ${r.geo} | ${r.ms} |`);

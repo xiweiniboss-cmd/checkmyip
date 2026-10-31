@@ -21,7 +21,8 @@ const run = (asn, org, extra = {}) => {
 };
 // 第 8 项：中国移动 → 家宽，置信度中
 for (const a of [9808, 56048, 24400]) { const r = run(a, 'China Mobile'); eq(`AS${a} 类型`, [r.type, r.confidenceText], ['residential', '中']); }
-eq('未收录编号的中国移动', [run(99999, 'China Mobile Communications Group Co., Ltd.').type, run(99999, 'China Mobile Communications Group Co., Ltd.').confidenceText], ['residential', '中']);
+// v0.3 第 6 项起：凡是按组织名关键词推测的类型，置信度一律「低」
+eq('未收录编号的中国移动', [run(99999, 'China Mobile Communications Group Co., Ltd.').type, run(99999, 'China Mobile Communications Group Co., Ltd.').confidenceText], ['residential', '低']);
 eq('中国电信 4134 仍为高置信', run(4134, 'CHINANET').confidenceText, '高');
 eq('CN2 4809 仍为运营商（家宽 / 中）', [classifyAsn(4809).cls, run(4809, '').confidenceText], ['isp', '中']);
 // 第 9 项：transit
@@ -37,6 +38,18 @@ eq('有位置但无 ASN', [part.incomplete, part.score <= 60, part.risk], [true,
 eq('无信誉库', [inc.reputation.used, !!inc.reputation.note], [false, true]);
 const withRep = analyze({ asn: { asn: 4134 }, asnInfo: classifyAsn(4134), tor: {}, external: [{ source: 'abuseipdb', ok: true, abuseScore: 0 }], quality: { geoOk: true } });
 eq('有信誉库', [withRep.reputation.used, withRep.reputation.note], [true, null]);
+
+// v0.3 第 6 项：未知 ASN / 按名称推测
+const q9 = run(19281, 'QUAD9-AS-1');
+eq('Quad9 9.9.9.9 不是低风险', [classifyAsn(19281).cls, q9.type, q9.risk !== 'low'], ['hosting', 'datacenter', true]);
+const unk = run(64999, 'Totally Unknown Org');
+eq('未知 ASN：扣分加大、风险中、置信度低、有提示', [unk.score, unk.risk, unk.confidenceText, unk.signals.find((x) => x.key === 'asn').detail.includes('该 ASN 不在内置库中，类型按名称推测')], [75, 'medium', '低', true]);
+const kwIsp = run(64998, 'Example Broadband Telecom');
+const kwSig = kwIsp.signals.find((x) => x.key === 'asn');
+eq('关键词推测：置信度低、提示、扣 5 分', [classifyAsn(64998, 'Example Broadband Telecom').by, kwIsp.confidenceText, kwSig.detail.includes('该 ASN 不在内置库中，类型按名称推测'), kwSig.effect], ['keyword', '低', true, -5]);
+const kwHost = run(64997, 'Example Hosting Ltd');
+eq('关键词推测机房：置信度低', [kwHost.type, kwHost.confidenceText], ['datacenter', '低']);
+eq('内置 ASN 不受影响', [run(7922, 'Comcast').confidenceText, run(7922, 'Comcast').score], ['高', 100]);
 
 console.log(`${fails ? '✘' : '✔'} 规则测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

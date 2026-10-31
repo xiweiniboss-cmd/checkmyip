@@ -49,6 +49,7 @@ const ASN_TABLE = new Map([
     [8560, 'IONOS'], [906, 'DMIT'], [21859, 'Zenlayer'], [63473, 'HostHatch'], [53667, 'FranTech / BuyVM'],
     [36007, 'Kamatera'], [200350, 'Yandex Cloud'], [49505, 'Selectel'], [210644, 'Aeza'], [44477, 'Stark Industries'],
     [63023, 'GTHost'], [46844, 'Sharktech'], [54290, 'Hostwinds'], [54825, 'Equinix Metal'], [199524, 'G-Core Labs'],
+    [19281, 'Quad9 (DNS / Anycast)'], [36692, 'Cisco OpenDNS (DNS / Anycast)'], [30607, 'Cisco Umbrella'],
     [202422, 'G-Core Labs'], [7979, 'Servers.com'], [46475, 'Limestone Networks'], [62240, 'Clouvider'],
     [36236, 'NetActuate'], [32097, 'WholeSale Internet'], [3258, 'xTom'], [62904, 'Eonix'], [19318, 'Interserver'],
   ]),

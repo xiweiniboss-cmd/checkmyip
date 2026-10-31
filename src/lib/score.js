@@ -8,6 +8,9 @@ export const TYPE = {
 const CLS_TEXT = { isp: '固网运营商', mobile: '移动运营商', business: '企业专线 / 商业网络', transit: '国际骨干 / 转接网络 (transit)', edu: '教育科研网', hosting: '数据中心 / 云服务', vpn: 'VPN / 代理托管' };
 
 export const INCOMPLETE_CAP = 60;
+export const KEYWORD_GUESS_NOTE = '该 ASN 不在内置库中，类型按名称推测。';
+export const UNKNOWN_ASN_PENALTY = -25;
+const KEYWORD_GUESS_PENALTY = -5;
 export const NO_REPUTATION_NOTE = '未接入信誉库：代理 / VPN 使用的家宽 IP 可能仍显示高分。';
 
 /**
@@ -30,6 +33,7 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
 
   // 2. ASN / AS 组织
   const via = asnInfo.by === 'asn' ? `AS${asn.asn} 在内置 ASN 名单中` : asnInfo.by === 'keyword' ? `组织名包含关键词「${asnInfo.keyword}」` : '';
+  const before = signals.length;
   switch (asnInfo.cls) {
     case 'hosting':
       add('asn', 'ASN 类型', asnInfo.by === 'asn' ? -55 : -45, 'bad', `${via}，属于${CLS_TEXT.hosting}（${asnInfo.name || asn.org || ''}）。`); labels.add('机房 IP'); break;
@@ -46,7 +50,15 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     case 'edu':
       add('asn', 'ASN 类型', 0, 'good', `${via}，属于${CLS_TEXT.edu}（${asnInfo.name || asn.org || ''}）。`); labels.add('教育网'); break;
     default:
-      add('asn', 'ASN 类型', -10, 'warn', asn.asn ? `AS${asn.asn}（${asn.org || '未知组织'}）不在内置名单中，组织名也无法判断类型。` : '未能获取 ASN 信息，无法判断网络类型。');
+      // 完全未知的 ASN 不能当作“干净”：加大扣分（100 → 75，风险「中」），类型置信度「低」
+      if (asn.asn) { add('asn', 'ASN 类型', UNKNOWN_ASN_PENALTY, 'warn', `AS${asn.asn}（${asn.org || '未知组织'}）：该 ASN 不在内置库中，类型按名称推测——但组织名也无法判断类型，按未知网络处理，扣分加大、置信度低。`); labels.add('未知网络'); }
+      else add('asn', 'ASN 类型', -10, 'warn', '未能获取 ASN 信息，无法判断网络类型。');
+  }
+  // 按组织名关键词推测的类型：明确提示、置信度降为「低」，原本不扣分的再扣 5 分
+  if (asnInfo.by === 'keyword' && signals.length > before) {
+    const sig = signals[signals.length - 1];
+    sig.detail = `${sig.detail} ${KEYWORD_GUESS_NOTE}`;
+    if (sig.effect === 0) { sig.effect = KEYWORD_GUESS_PENALTY; sig.level = 'warn'; }
   }
 
   // 3. 反向解析
@@ -106,6 +118,7 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     else { type = 'residential'; confidence = asnInfo.mixed ? 'medium' : asnInfo.by === 'asn' || ptr.signal === 'residential' ? 'high' : 'medium'; }
   } else if (ptr.signal === 'datacenter' || extDc) { type = 'datacenter'; confidence = 'low'; }
   else if (ptr.signal === 'residential') { type = 'residential'; confidence = 'low'; }
+  if (asnInfo.by === 'keyword' && !cloud.length) confidence = 'low';
   if (tor.tor && type !== 'datacenter') { type = 'proxy'; confidence = 'high'; }
   if (type === 'residential') labels.add('家庭宽带');
 

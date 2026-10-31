@@ -9,9 +9,11 @@ import { isTorExit } from './lib/tor.js';
 import { externalRisk } from './lib/external.js';
 import { analyze } from './lib/score.js';
 import { fetchText } from './lib/http.js';
+import { estimateSharing } from './lib/sharing.js';
+import { seenStatus, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
 import meta from './data/meta.json';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 // ---------- 小工具 ----------
 function json(data, status = 200, extra = {}) {
@@ -81,24 +83,45 @@ async function cached(key, ttl, ctx, producer) {
   return { ...data, cache: 'miss' };
 }
 
-// 限流：优先使用 Cloudflare Rate Limiting 绑定（env.LOOKUP_LIMITER，见 wrangler.toml / README），
-// 未配置时退回进程内计数（每个 isolate 独立，只能挡住最粗暴的刷接口）。
-const rl = new Map();
-async function rateLimited(env, who, limit) {
-  const b = env.LOOKUP_LIMITER;
-  if (b && typeof b.limit === 'function') {
-    try { const { success } = await b.limit({ key: `lookup:${who}` }); return { limited: !success, via: 'binding' }; }
-    catch { /* 绑定异常时退回内存计数 */ }
-  }
-  return { limited: memLimited(who, limit), via: 'memory' };
+// ---------- 限流 ----------
+// 没有 Origin 的请求（curl、脚本）不受 CORS 约束，真正的保护是限流。
+// 优先使用 Cloudflare Rate Limiting 绑定（wrangler.toml 默认已启用三个），缺失时退回进程内计数
+// （每个 isolate 独立，只能挡住最粗暴的刷接口），并在每个 isolate 里大声 console.warn 一次。
+const LIMITS = {
+  self: { binding: 'SELF_LIMITER', env: 'SELF_RATE_LIMIT', def: 60, text: '查询自己的 IP' },
+  lookup: { binding: 'LOOKUP_LIMITER', env: 'LOOKUP_RATE_LIMIT', def: 20, text: '查询其他 IP（?ip=）' },
+  seen: { binding: 'SEEN_LIMITER', env: 'SEEN_RATE_LIMIT', def: 10, text: '上报设备（/api/seen）' },
+};
+const warned = new Set();
+function limiterMode(env, bucket) {
+  const b = env[LIMITS[bucket].binding];
+  return b && typeof b.limit === 'function' ? 'binding' : 'memory';
 }
-function memLimited(who, limit) {
+function warnMissingLimiter(env, bucket) {
+  if (warned.has(bucket)) return;
+  warned.add(bucket);
+  const c = LIMITS[bucket];
+  console.warn(`[checkmyip] ⚠️ 未找到 Rate Limiting 绑定 ${c.binding}：「${c.text}」退回进程内限流（每 isolate 独立、可被轻易绕过）。请在 wrangler.toml 中配置 [[ratelimits]] ${c.binding}，详见 README「限流」。`);
+}
+const rl = new Map();
+async function rateLimited(env, bucket, who) {
+  const c = LIMITS[bucket];
+  const b = env[c.binding];
+  if (b && typeof b.limit === 'function') {
+    try { const { success } = await b.limit({ key: `${bucket}:${who}` }); return { limited: !success, via: 'binding' }; }
+    catch (e) { console.warn(`[checkmyip] Rate Limiting 绑定 ${c.binding} 调用失败，本次退回进程内计数：${e}`); }
+  } else warnMissingLimiter(env, bucket);
+  return { limited: memLimited(`${bucket}:${who}`, Number(env[c.env]) || c.def), via: 'memory' };
+}
+function memLimited(key, limit) {
   const now = Date.now();
-  const e = rl.get(who);
-  if (!e || now - e.t > 60_000) { rl.set(who, { t: now, n: 1 }); if (rl.size > 5000) rl.clear(); return false; }
+  const e = rl.get(key);
+  if (!e || now - e.t > 60_000) { rl.set(key, { t: now, n: 1 }); if (rl.size > 5000) rl.clear(); return false; }
   e.n += 1;
   return e.n > limit;
 }
+const tooMany = (rlr) => json({ ok: false, error: 'rate_limited', message: '请求过于频繁，请稍后再试' }, 429, { 'retry-after': '60', 'x-ratelimit-via': rlr.via });
+const clientKey = (request) => request.headers.get('cf-connecting-ip') || 'local';
 
 // ---------- 访问者 IP ----------
 async function resolveVisitor(request, env) {
@@ -158,6 +181,7 @@ async function lookup(parsed, { env, ctx, cf, proxyHeaders = [] }) {
   const ptrInfo = { ...ext.ptr, ...classifyPtr(ext.ptr?.ptr) };
   const quality = { geoOk: !!(useCf || ext.geo), ptrOk: !ext.ptr?.error };
   const analysis = analyze({ cloud, asn: { asn: geo.asn, org: geo.org }, asnInfo, ptr: ptrInfo, tor, external, proxyHeaders, quality });
+  const sharing = estimateSharing({ ip: parsed.ip, version: parsed.version, countryCode: geo.countryCode, asnInfo, ptr: ptrInfo, cloud, tor, external, analysis });
 
   return {
     ok: true,
@@ -182,6 +206,7 @@ async function lookup(parsed, { env, ctx, cf, proxyHeaders = [] }) {
       cloudProvider: cloud.map((c) => c.name),
     },
     analysis,
+    sharing,
     sources: {
       geo: geoSource,
       geoAttempts: useCf ? [] : ext.attempts,
@@ -204,26 +229,80 @@ async function handleIp(request, env, ctx, url, pol) {
     if (!pol.allowed) return json({ ok: false, error: 'origin_not_allowed', message: '该来源不允许调用查询接口' }, 403);
     const parsed = parseIP(q);
     if (!parsed) return json({ ok: false, error: 'invalid_ip', message: '请输入有效的 IPv4 或 IPv6 地址' }, 400);
-    const who = request.headers.get('cf-connecting-ip') || 'local';
-    const rlr = await rateLimited(env, who, Number(env.LOOKUP_RATE_LIMIT) || 30);
-    if (rlr.limited) return json({ ok: false, error: 'rate_limited', message: '查询过于频繁，请稍后再试' }, 429, { 'retry-after': '60', 'x-ratelimit-via': rlr.via });
+    const rlr = await rateLimited(env, 'lookup', clientKey(request));
+    if (rlr.limited) return tooMany(rlr);
     const bogon = bogonReason(parsed);
     if (bogon) return json({ ok: false, error: 'bogon', ip: parsed.ip, version: parsed.version, message: `${parsed.ip} 是${bogon}，不属于公网 IP，无法查询` }, 422);
     const data = await lookup(parsed, { env, ctx });
+    // 隐私：本站观测数只对访问者自己的 IP 显示，避免通过 ?ip= 打听某个 IP 是否来过本站
+    data.sharing.observed = { shown: false, reason: 'not_self', message: '本站观测数只对你自己的 IP 显示' };
     return json({ ...data, query: 'lookup' }, 200, { 'x-ratelimit-via': rlr.via });
   }
+  const rlr = await rateLimited(env, 'self', clientKey(request));
+  if (rlr.limited) return tooMany(rlr);
   const v = await resolveVisitor(request, env);
   if (!v.parsed) return json({ ok: false, error: 'no_ip', message: '无法确定访问者 IP' }, 500);
   const bogon = bogonReason(v.parsed);
   if (bogon) return json({ ok: false, error: 'bogon', ip: v.parsed.ip, message: `检测到的 IP ${v.parsed.ip} 是${bogon}` }, 422);
   const cf = v.trustCf ? request.cf : null;
   const data = await lookup(v.parsed, { env, ctx, cf, proxyHeaders: v.trustCf ? proxyHeaderHints(request) : [] });
+  data.sharing.observed = await observedFor(env, v.parsed);
   return json({
     ...data,
     query: 'self',
     seenVia: v.via,
     connection: cf ? { colo: cf.colo, httpProtocol: cf.httpProtocol, tlsVersion: cf.tlsVersion, rttMs: cf.clientTcpRtt ?? null } : null,
-  });
+  }, 200, { 'x-ratelimit-via': rlr.via });
+}
+
+// ---------- 本站观测到的设备数（D1）----------
+async function observedFor(env, parsed) {
+  const st = seenStatus(env);
+  if (!st.enabled) return { shown: true, enabled: false, reason: st.reason, message: st.message };
+  try {
+    const c = await countSeen(env, parsed);
+    return { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS };
+  } catch (e) {
+    console.warn(`[checkmyip] D1 查询失败：${e}`);
+    return { shown: true, enabled: false, reason: 'db_error', message: '本站统计暂时不可用' };
+  }
+}
+
+// POST /api/seen  { fp: "<浏览器端指纹哈希>" }：仅限同源、限流、同一 IP + 指纹每天只记一次
+async function handleSeen(request, env, ctx, url) {
+  const origin = request.headers.get('origin');
+  const site = request.headers.get('sec-fetch-site');
+  if (!origin || origin !== url.origin || (site && site !== 'same-origin')) return json({ ok: false, error: 'origin_not_allowed', message: '仅限本站页面调用' }, 403);
+  if (!/^application\/json\b/i.test(request.headers.get('content-type') || '')) return json({ ok: false, error: 'bad_content_type' }, 415);
+  const rlr = await rateLimited(env, 'seen', clientKey(request));
+  if (rlr.limited) return tooMany(rlr);
+  const st = seenStatus(env);
+  if (!st.enabled) return json({ ok: true, enabled: false, reason: st.reason, message: st.message });
+  const raw = await request.text();
+  if (raw.length > 512) return json({ ok: false, error: 'too_large' }, 413);
+  let fp = null;
+  try { fp = JSON.parse(raw).fp; } catch { /* 下面统一报错 */ }
+  if (!validFp(fp)) return json({ ok: false, error: 'invalid_fp', message: 'fp 必须是 8–64 位十六进制哈希' }, 400);
+  const v = await resolveVisitor(request, env);
+  if (!v.parsed || bogonReason(v.parsed)) return json({ ok: false, error: 'no_ip', message: '无法确定访问者 IP' }, 422);
+  try {
+    const r = await recordSeen(env, v.parsed, fp);
+    maybeCleanup(env, ctx);
+    const c = await countSeen(env, v.parsed);
+    return json({ ok: true, enabled: true, recorded: r.inserted, observed: { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS } }, 200, { 'x-ratelimit-via': rlr.via });
+  } catch (e) {
+    console.warn(`[checkmyip] D1 写入失败：${e}`);
+    return json({ ok: false, enabled: false, error: 'db_error', message: '本站统计暂时不可用' }, 503);
+  }
+}
+
+function health(env) {
+  const rateLimit = Object.fromEntries(Object.entries(LIMITS).map(([k, c]) => [k, { binding: c.binding, mode: limiterMode(env, k) }]));
+  const warnings = Object.entries(rateLimit).filter(([, x]) => x.mode !== 'binding')
+    .map(([k, x]) => `未配置 Rate Limiting 绑定 ${x.binding}：「${LIMITS[k].text}」正在使用进程内限流（可被绕过）`);
+  const seen = seenStatus(env);
+  if (!seen.enabled) warnings.push(seen.message);
+  return { ok: true, version: VERSION, time: new Date().toISOString(), rateLimit, seen: { enabled: seen.enabled, reason: seen.reason || null }, warnings };
 }
 
 // v4.<域名> / v6.<域名>：只返回访问者 IP 的极简探测接口（这两个子域分别只配 A / AAAA 记录）
@@ -235,11 +314,12 @@ async function handleProbe(request, env, url) {
 }
 
 async function route(request, env, ctx, url, pol) {
-  if (request.method === 'OPTIONS') return new Response(null, { status: pol.allowed ? 204 : 403 });
+  if (request.method === 'OPTIONS') return new Response(null, { status: pol.allowed && url.pathname !== '/api/seen' ? 204 : 403 });
+  if (/^v[46]\./.test(url.hostname)) return request.method === 'GET' || request.method === 'HEAD' ? handleProbe(request, env, url) : json({ ok: false, error: 'method_not_allowed' }, 405);
+  if (url.pathname === '/api/seen') return request.method === 'POST' ? handleSeen(request, env, ctx, url) : json({ ok: false, error: 'method_not_allowed' }, 405, { allow: 'POST' });
   if (request.method !== 'GET' && request.method !== 'HEAD') return json({ ok: false, error: 'method_not_allowed' }, 405);
-  if (/^v[46]\./.test(url.hostname)) return handleProbe(request, env, url);
   if (url.pathname === '/api/ip') return handleIp(request, env, ctx, url, pol);
-  if (url.pathname === '/api/health') return json({ ok: true, version: VERSION, time: new Date().toISOString() });
+  if (url.pathname === '/api/health') return json(health(env));
   if (url.pathname === '/api/meta') return json({ ok: true, version: VERSION, data: meta }, 200, { 'cache-control': 'public, max-age=3600' });
   return json({ ok: false, error: 'not_found' }, 404);
 }
@@ -257,5 +337,10 @@ export default {
       }
     }
     return env.ASSETS.fetch(request);
+  },
+  // 每日 cron（见 wrangler.toml [triggers]）：删除 30 天前的观测记录
+  async scheduled(event, env, ctx) {
+    if (!seenStatus(env).enabled) return;
+    ctx.waitUntil(cleanupSeen(env).then((r) => console.log(`[checkmyip] 清理 ip_seen：删除 ${r.deleted} 行`)).catch((e) => console.warn(`[checkmyip] 清理失败：${e}`)));
   },
 };

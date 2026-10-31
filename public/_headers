@@ -5,5 +5,7 @@
   Permissions-Policy: geolocation=(), camera=(), microphone=()
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
 
+# /assets/* 的引用都带 ?v=<内容哈希>（scripts/stamp-assets.mjs），内容变了 URL 就变，因此可以长期缓存。
+# index.html 与 /config.js 走 Cloudflare 默认策略（每次重新验证）。
 /assets/*
-  Cache-Control: public, max-age=3600
+  Cache-Control: public, max-age=31536000, immutable
