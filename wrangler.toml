@@ -15,26 +15,60 @@ GEO_PROVIDERS = "ip.sb,ipwho.is,geojs,ipapi.is,ipinfo,ipapi.co"
 CACHE_TTL = "21600"
 # 每个外部请求的超时（毫秒）
 LOOKUP_TIMEOUT_MS = "3000"
-# 未配置 LOOKUP_LIMITER 绑定时，进程内限流的阈值：每个访问者每分钟最多查询其他 IP 的次数（按 isolate 计，较粗略）
-LOOKUP_RATE_LIMIT = "30"
+# 下面三个阈值只在缺少对应 Rate Limiting 绑定时使用（进程内计数，每 isolate 独立，较粗略；单位：次/分钟）
+SELF_RATE_LIMIT = "60"
+LOOKUP_RATE_LIMIT = "20"
+SEEN_RATE_LIMIT = "10"
 # 允许跨域调用 /api/ip?ip= 的来源（逗号分隔，含协议，不带结尾斜杠）。留空 = 只允许同源。
 # v4./v6. 探测子域会自动允许其主域名；DEV_MODE=true 时额外允许 localhost / 127.0.0.1。
+# /api/seen 永远只接受同源请求，不受此项影响。
 ALLOWED_ORIGINS = ""
 
-# ---------- 可选：Cloudflare Rate Limiting 绑定（推荐，见 README「限流」）----------
-# 配置后 Worker 自动改用该绑定限流（按 Cloudflare 节点计数），未配置时退回进程内计数。
-# [[ratelimits]]
-# name = "LOOKUP_LIMITER"
-# namespace_id = "1001"        # 账号内唯一的正整数（字符串）
-#   [ratelimits.simple]
-#   limit = 30                 # 每个访问者每 period 秒最多查询次数
-#   period = 60                # 只能是 10 或 60
+# ---------- Cloudflare Rate Limiting 绑定（默认启用，见 README「限流」）----------
+# 按 Cloudflare 节点计数，key 为访问者 IP。缺少某个绑定时 Worker 会退回进程内计数，
+# 每个 isolate 打印一次 console.warn，并在 /api/health 的 rateLimit / warnings 中显示。
+# namespace_id 需在你的 Cloudflare 账号内唯一（正整数字符串）；period 只能是 10 或 60。
+[[ratelimits]]
+name = "SELF_LIMITER"          # 查询自己的 IP（页面加载）：宽松
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "LOOKUP_LIMITER"        # ?ip= 查询其他 IP：较严
+namespace_id = "1002"
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+[[ratelimits]]
+name = "SEEN_LIMITER"          # POST /api/seen 上报设备：严格
+namespace_id = "1003"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# ---------- D1：「本站观测到的设备数」（见 README「预估多少人在用这个 IP」）----------
+# 部署前：npx wrangler d1 create checkmyip，把输出的 database_id 填到下面（当前是占位 UUID，仅供本地 --local 使用）；
+# 然后 npx wrangler d1 migrations apply checkmyip --remote，并设置密钥 npx wrangler secret put IP_HASH_SALT。
+# 不想启用：注释掉整个 [[d1_databases]] 块，页面会显示「本站统计未启用」，其余功能不受影响。
+[[d1_databases]]
+binding = "DB"
+database_name = "checkmyip"
+database_id = "00000000-0000-0000-0000-000000000000"   # TODO: 替换为 wrangler d1 create 输出的 ID
+migrations_dir = "migrations"
+
+# 每天 19:17 UTC（北京时间 03:17）删除 30 天前的观测记录；写入时也会惰性清理
+[triggers]
+crons = ["17 19 * * *"]
 
 # 可选密钥请用 secret 设置，不要写进本文件：
 #   npx wrangler secret put IPAPI_IS_KEY
 #   npx wrangler secret put PROXYCHECK_KEY
 #   npx wrangler secret put ABUSEIPDB_KEY
 #   npx wrangler secret put IPINFO_TOKEN
+#   npx wrangler secret put IP_HASH_SALT     # 「本站观测」哈希用的随机盐，至少 16 个字符，例如 openssl rand -hex 32
 # 本地开发可写在 .dev.vars（见 .dev.vars.example）
 
 # ====================== 模板：自定义域名（默认不启用）======================

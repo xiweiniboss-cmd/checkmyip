@@ -6,3 +6,6 @@ DEV_MODE=true
 # PROXYCHECK_KEY=
 # ABUSEIPDB_KEY=
 # IPINFO_TOKEN=
+# 「本站观测到的设备数」用的哈希盐（本地随便填一个 ≥16 字符的随机串；线上用 wrangler secret put IP_HASH_SALT）
+# 不填则该功能显示「本站统计未启用」
+IP_HASH_SALT=change-me-local-dev-only-0123456789
