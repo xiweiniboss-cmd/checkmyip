@@ -1,0 +1,96 @@
+{
+  "generatedAt": "2026-10-31T11:59:20.390Z",
+  "sources": {
+    "aws": {
+      "ok": true,
+      "url": "https://ip-ranges.amazonaws.com/ip-ranges.json",
+      "input": 17754,
+      "v4": 1750,
+      "v6": 2359,
+      "invalid": 0
+    },
+    "gcp": {
+      "ok": true,
+      "url": "https://www.gstatic.com/ipranges/cloud.json",
+      "input": 1151,
+      "v4": 467,
+      "v6": 28,
+      "invalid": 0
+    },
+    "google": {
+      "ok": true,
+      "url": "https://www.gstatic.com/ipranges/goog.json",
+      "input": 148,
+      "v4": 132,
+      "v6": 16,
+      "invalid": 0
+    },
+    "cloudflare": {
+      "ok": true,
+      "url": "https://www.cloudflare.com/ips-v4",
+      "input": 22,
+      "v4": 15,
+      "v6": 7,
+      "invalid": 0
+    },
+    "azure": {
+      "ok": true,
+      "url": "https://www.microsoft.com/en-us/download/details.aspx?id=56519",
+      "input": 2216,
+      "v4": 895,
+      "v6": 1242,
+      "invalid": 0
+    },
+    "oracle": {
+      "ok": true,
+      "url": "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json",
+      "input": 1118,
+      "v4": 809,
+      "v6": 0,
+      "invalid": 0
+    },
+    "digitalocean": {
+      "ok": true,
+      "url": "https://www.digitalocean.com/geo/google.csv",
+      "input": 1236,
+      "v4": 184,
+      "v6": 53,
+      "invalid": 0
+    },
+    "linode": {
+      "ok": true,
+      "url": "https://geoip.linode.com/",
+      "input": 5505,
+      "v4": 240,
+      "v6": 39,
+      "invalid": 0
+    },
+    "vultr": {
+      "ok": true,
+      "url": "https://geofeed.constant.com/?text",
+      "input": 494,
+      "v4": 119,
+      "v6": 21,
+      "invalid": 0
+    },
+    "fastly": {
+      "ok": true,
+      "url": "https://api.fastly.com/public-ip-list",
+      "input": 24,
+      "v4": 21,
+      "v6": 3,
+      "invalid": 0
+    },
+    "tor": {
+      "ok": true,
+      "url": "https://check.torproject.org/torbulkexitlist",
+      "count": 1224
+    }
+  },
+  "index": {
+    "v4Segments": 2583,
+    "v6Segments": 3217,
+    "v6Width": 32,
+    "labels": 10
+  }
+}
