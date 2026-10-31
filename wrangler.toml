@@ -1,0 +1,33 @@
+name = "checkmyip"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# 单个 Worker 同时提供静态页面（public/）与 /api/* 接口
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[vars]
+# 查询其他 IP 时依次尝试的地理位置接口（逗号分隔）。可选：ip.sb, ipwho.is, geojs, ipapi.is, ipinfo, ipapi.co, ip-api
+GEO_PROVIDERS = "ip.sb,ipwho.is,geojs,ipapi.is,ipinfo,ipapi.co"
+# 外部查询结果缓存时间（秒）
+CACHE_TTL = "21600"
+# 每个外部请求的超时（毫秒）
+LOOKUP_TIMEOUT_MS = "3000"
+# 每个访问者每分钟最多查询其他 IP 的次数（粗略，按 isolate 计）
+LOOKUP_RATE_LIMIT = "30"
+
+# 可选密钥请用 secret 设置，不要写进本文件：
+#   npx wrangler secret put IPAPI_IS_KEY
+#   npx wrangler secret put PROXYCHECK_KEY
+#   npx wrangler secret put ABUSEIPDB_KEY
+#   npx wrangler secret put IPINFO_TOKEN
+# 本地开发可写在 .dev.vars（见 .dev.vars.example）
+
+# 绑定自定义域名示例（部署前取消注释并改成你的域名）：
+# routes = [
+#   { pattern = "checkmyip.example.com", custom_domain = true },
+#   { pattern = "v4.checkmyip.example.com", custom_domain = true },
+#   { pattern = "v6.checkmyip.example.com", custom_domain = true },
+# ]

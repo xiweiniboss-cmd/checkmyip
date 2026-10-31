@@ -1,0 +1,326 @@
+// checkmyip 前端主逻辑
+(function () {
+  'use strict';
+  const CFG = window.CHECKMYIP_CONFIG || {};
+  const $ = (s, r = document) => r.querySelector(s);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const icon = (id) => `<svg viewBox="0 0 24 24"><use href="/assets/icons.svg#${id}"/></svg>`;
+  const LEVEL_ICON = { good: 'ok', warn: 'warn', bad: 'bad', info: 'info' };
+  const TYPE_CLASS = { residential: 'good', mobile: 'teal', business: 'warn', edu: 'purple', datacenter: 'bad', proxy: 'bad', unknown: 'soft' };
+  const RISK_CLASS = { low: 'good', medium: 'warn', high: 'bad' };
+
+  const state = { self: null, view: null, fp: null, rtc: null, v4: undefined, v6: undefined };
+
+  // ---------- 主题 ----------
+  $('#themeBtn').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('cmi-theme', next); } catch (e) {}
+  });
+
+  // ---------- 提示 ----------
+  let toastT;
+  function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 1800); }
+
+  // ---------- 导航高亮 ----------
+  const navLinks = [...document.querySelectorAll('.nav a')];
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) navLinks.forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id));
+  }, { rootMargin: '-45% 0px -50% 0px' });
+  document.querySelectorAll('main .section').forEach((s) => io.observe(s));
+
+  // ---------- API ----------
+  async function api(ip) {
+    const r = await fetch('/api/ip' + (ip ? `?ip=${encodeURIComponent(ip)}` : ''), { headers: { accept: 'application/json' } });
+    let d = null;
+    try { d = await r.json(); } catch (e) {}
+    if (!d) throw new Error(`服务暂时不可用（HTTP ${r.status}）`);
+    if (!d.ok) throw new Error(d.message || '查询失败');
+    return d;
+  }
+
+  // ---------- IP 卡片渲染 ----------
+  function locText(l) {
+    const parts = [l.region, l.city].filter(Boolean);
+    const uniq = parts.filter((x, i) => parts.indexOf(x) === i);
+    return uniq.join(' · ') || '—';
+  }
+
+  function renderIp(d) {
+    state.view = d;
+    const a = d.analysis, l = d.location, n = d.network;
+    const mine = d.query === 'self';
+    $('#ipEyebrow').textContent = mine ? '本站看到的你的 IP' : '查询的 IP';
+    $('#heroTitle').textContent = mine ? '你的 IP 纯净吗？' : `IP 查询：${d.ip}`;
+    $('#mineBtn').hidden = mine;
+    const ipEl = $('#ipValue');
+    ipEl.textContent = d.ip; ipEl.classList.remove('skel'); ipEl.classList.toggle('v6', d.version === 6);
+    $('#ipVersionChips').innerHTML = `<span class="badge blue">IPv${d.version}</span>${mine && d.seenVia && d.seenVia !== 'cf-connecting-ip' ? `<span class="badge soft" title="本地开发模式">${esc(d.seenVia)}</span>` : ''}`;
+
+    const badges = [`<span class="badge lg ${TYPE_CLASS[a.type]}"><span class="dot"></span>${esc(a.typeText)}</span>`,
+      `<span class="badge lg ${RISK_CLASS[a.risk]}">风险：${esc(a.riskText)}</span>`];
+    for (const lb of a.labels) if (lb !== a.typeText) badges.push(`<span class="badge soft">${esc(lb)}</span>`);
+    $('#ipBadges').innerHTML = badges.join('');
+
+    const country = l.country ? `${esc(l.country)}${l.countryCode ? ` <span class="sub2">${esc(l.countryCode)}${l.countryEn && l.countryEn !== l.country ? ' · ' + esc(l.countryEn) : ''}</span>` : ''}` : '—';
+    const org = n.org || n.isp || '—';
+    const asnLine = n.asn ? `AS${n.asn}${n.asnName ? ` <span class="sub2">${esc(n.asnName)}</span>` : ''}` : '—';
+    const ispSub = n.isp && n.isp !== n.org ? `<span class="sub2">${esc(n.isp)}</span>` : (n.cloudProvider.length ? `<span class="sub2">云厂商：${esc(n.cloudProvider.join('、'))}</span>` : '');
+    $('#ipKv').innerHTML = [
+      ['国家 / 地区', country], ['省份 / 城市', esc(locText(l))], ['ASN', asnLine], ['运营商 / 组织', esc(org) + ispSub],
+      ['时区', l.timezone ? `${esc(l.timezone)} <span class="sub2">${esc(tzOffsetOf(l.timezone) || '')}</span>` : '—'],
+      ['反向解析 (PTR)', n.ptr ? `<span class="mono-in">${esc(n.ptr)}</span>` : '<span class="muted">无记录</span>'],
+    ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+
+    const strip = $('#locStrip');
+    if (l.latitude != null && l.longitude != null) {
+      const lat = Number(l.latitude).toFixed(4), lon = Number(l.longitude).toFixed(4);
+      const name = encodeURIComponent([l.country, l.region, l.city].filter(Boolean).join(' '));
+      strip.innerHTML = `${icon('pin')}<span>大致位置</span><span class="coords">${lat}, ${lon}</span>${d.connection?.colo ? `<span class="badge soft">CF 节点 ${esc(d.connection.colo)}</span>` : ''}
+        <span class="links"><a href="https://uri.amap.com/marker?position=${lon},${lat}&name=${name}&coordinate=wgs84" target="_blank" rel="noopener">高德地图</a><a href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=9/${lat}/${lon}" target="_blank" rel="noopener">OpenStreetMap</a></span>`;
+      strip.hidden = false;
+    } else strip.hidden = true;
+
+    // 评分
+    const card = $('#scoreCard');
+    const color = a.score >= 80 ? '#10b981' : a.score >= 50 ? '#f59e0b' : '#ef4444';
+    card.style.setProperty('--gauge-color', color);
+    $('#gaugeBar').setAttribute('stroke-dasharray', `${Math.max(0.5, a.score)} 100`);
+    animateNum($('#scoreNum'), a.score);
+    $('#scoreLabel').textContent = a.score >= 80 ? '较为纯净' : a.score >= 50 ? '一般' : '纯净度低';
+    $('#scoreSummary').innerHTML = summaryOf(d);
+    $('#typeText').textContent = a.typeText; $('#riskText').textContent = a.riskText; $('#confText').textContent = a.confidenceText;
+
+    $('#signals').innerHTML = a.signals.map((s) => `<li class="signal ${s.level}"><span class="sig-ico">${icon(LEVEL_ICON[s.level] || 'info')}</span>
+      <div><div class="sig-name">${esc(s.name)}</div><div class="sig-detail">${esc(s.detail)}</div></div>
+      <span class="sig-effect ${s.effect < 0 ? 'neg' : s.effect > 0 ? 'pos' : ''}">${s.effect > 0 ? '+' : ''}${s.effect || '±0'}</span></li>`).join('');
+    $('#scoreNote').textContent = a.note;
+    const src = [d.sources.geo && `位置：${d.sources.geo}`, d.sources.ptr && `PTR：${d.sources.ptr}`].filter(Boolean).join(' · ');
+    $('#srcLine').textContent = src;
+    if (d.sources.dataUpdatedAt) $('#dataMeta').textContent = `IP 段数据更新：${new Date(d.sources.dataUpdatedAt).toLocaleDateString('zh-CN')}`;
+  }
+
+  function summaryOf(d) {
+    const a = d.analysis, n = d.network;
+    const who = esc(n.isp || n.asnName || n.org || '未知运营商');
+    const neg = a.signals.filter((x) => x.effect < 0).sort((x, y) => x.effect - y.effect).map((x) => esc(x.name));
+    if (a.risk === 'low') return `该 IP 属于 <b>${who}</b>，判断为<b>${esc(a.typeText)}</b>，未发现明显的机房 / 代理特征。`;
+    return `该 IP 属于 <b>${who}</b>，判断为<b>${esc(a.typeText)}</b>。主要扣分项：${neg.slice(0, 3).join('、') || '无'}。`;
+  }
+
+  function renderIpError(msg) {
+    $('#scoreSummary').textContent = '';
+    $('#ipValue').classList.remove('skel');
+    $('#ipValue').textContent = '—';
+    $('#ipBadges').innerHTML = '';
+    $('#ipKv').innerHTML = `<div style="grid-column:1/-1;border:0"><div class="error-box">${esc(msg)}</div></div>`;
+    $('#locStrip').hidden = true;
+    $('#signals').innerHTML = '';
+    $('#scoreNum').textContent = '--'; $('#scoreLabel').textContent = '无法评分';
+    $('#gaugeBar').setAttribute('stroke-dasharray', '0 100');
+  }
+
+  function setLoading() {
+    $('#ipValue').classList.add('skel');
+    $('#ipBadges').innerHTML = '<span class="badge skel">加载中</span>';
+    $('#signals').innerHTML = '<li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li>';
+    $('#scoreLabel').textContent = '计算中';
+  }
+
+  function animateNum(el, to) {
+    const from = Number(el.textContent) || 0; const t0 = performance.now();
+    const step = (t) => { const k = Math.min(1, (t - t0) / 800); el.textContent = Math.round(from + (to - from) * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }
+
+  // ---------- 时区工具 ----------
+  function offsetMinutes(tz) {
+    try {
+      const s = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName').value;
+      const m = s.match(/GMT([+-])(\d{2}):?(\d{2})?/); if (!m) return 0;
+      return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0));
+    } catch (e) { return null; }
+  }
+  function tzOffsetOf(tz) { const m = offsetMinutes(tz); if (m == null) return null; const a = Math.abs(m); return `UTC${m < 0 ? '-' : '+'}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`; }
+
+  // ---------- 查询 ----------
+  async function show(ip) {
+    setLoading();
+    try {
+      const d = ip ? await api(ip) : (state.self || await loadSelf());
+      renderIp(d);
+      const u = new URL(location.href);
+      if (ip) u.searchParams.set('ip', d.ip); else u.searchParams.delete('ip');
+      history.replaceState(null, '', u);
+    } catch (e) { renderIpError(e.message); }
+  }
+  async function loadSelf() { state.self = await api(); renderEnv(); renderStack(); checkRtc(); return state.self; }
+
+  $('#searchForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = $('#searchInput').value.trim();
+    if (!v) { toast('请输入要查询的 IP'); return; }
+    show(v);
+  });
+  $('#mineBtn').addEventListener('click', () => { $('#searchInput').value = ''; show(null); });
+  $('#copyBtn').addEventListener('click', async () => {
+    const ip = state.view?.ip; if (!ip) return;
+    try { await navigator.clipboard.writeText(ip); toast('已复制 ' + ip); } catch (e) { toast('复制失败，请手动选择'); }
+  });
+
+  // ---------- IPv4 / IPv6 ----------
+  async function probe(urls) {
+    for (const u of urls || []) {
+      try {
+        const r = await fetch(u, { signal: AbortSignal.timeout ? AbortSignal.timeout(5000) : undefined, cache: 'no-store' });
+        if (!r.ok) continue;
+        const t = (await r.text()).trim();
+        let ip = t;
+        if (t.startsWith('{')) { try { ip = JSON.parse(t).ip; } catch (e) { continue; } }
+        if (ip && /^[0-9a-f.:]+$/i.test(ip)) return ip;
+      } catch (e) { /* 下一个 */ }
+    }
+    return null;
+  }
+  function detectStack() {
+    const done = () => { renderStack(); renderEnv(); renderRtc(); };
+    probe(CFG.ipv4).then((ip) => { state.v4 = ip && !ip.includes(':') ? ip : null; done(); });
+    probe(CFG.ipv6).then((ip) => { state.v6 = ip && ip.includes(':') ? ip : null; done(); });
+  }
+  function renderStack() {
+    const seen = state.self?.ip;
+    const row = (proto, ip) => {
+      if (ip === undefined) return `<li><span class="proto">${proto}</span><span class="val skel">检测中</span></li>`;
+      if (!ip) return `<li><span class="proto">${proto}</span><span class="val none">未检测到${proto === 'IPv6' ? '（网络可能不支持 IPv6）' : ''}</span></li>`;
+      const same = seen && ip === seen;
+      return `<li><span class="proto">${proto}</span><span class="val">${esc(ip)}</span>${same ? '<span class="badge good tag">本站所见</span>' : ''}</li>`;
+    };
+    $('#stackList').innerHTML = row('IPv4', state.v4) + row('IPv6', state.v6);
+    $('#seenProto').textContent = state.self ? `IPv${state.self.version}（${state.self.ip}）` : '—';
+  }
+
+  // ---------- 环境一致性 ----------
+  const LANG_BY_COUNTRY = { CN: ['zh'], HK: ['zh', 'en'], MO: ['zh', 'pt'], TW: ['zh'], SG: ['en', 'zh', 'ms', 'ta'], JP: ['ja'], KR: ['ko'],
+    US: ['en', 'es'], GB: ['en'], CA: ['en', 'fr'], AU: ['en'], NZ: ['en'], IE: ['en'], DE: ['de'], AT: ['de'], CH: ['de', 'fr', 'it'],
+    FR: ['fr'], ES: ['es', 'ca'], IT: ['it'], NL: ['nl'], BE: ['nl', 'fr'], RU: ['ru'], UA: ['uk', 'ru'], BR: ['pt'], PT: ['pt'],
+    MX: ['es'], AR: ['es'], IN: ['en', 'hi'], TH: ['th'], VN: ['vi'], ID: ['id'], MY: ['ms', 'en', 'zh'], PH: ['en', 'fil'],
+    TR: ['tr'], PL: ['pl'], SE: ['sv'], NO: ['nb', 'no', 'nn'], FI: ['fi'], DK: ['da'], IL: ['he'], SA: ['ar'], AE: ['ar', 'en'] };
+
+  function envChecks() {
+    const s = state.self, f = state.fp;
+    if (!s || !f) return null;
+    const out = [];
+    // 时区
+    if (s.location.timezone && f.timezone) {
+      const a = offsetMinutes(s.location.timezone), b = -new Date().getTimezoneOffset();
+      const ok = a === b;
+      out.push({ level: ok ? 'good' : 'warn', title: ok ? '时区一致' : '时区不一致',
+        text: `浏览器 ${f.timezone}（${tzOffsetOf(f.timezone) || f.tzOffset}），IP 所在 ${s.location.timezone}（${tzOffsetOf(s.location.timezone) || '?'}）` });
+    } else out.push({ level: 'info', title: '时区', text: '缺少 IP 时区信息，无法比较。' });
+    // 语言
+    const cc = s.location.countryCode;
+    const langs = f.languages.map((x) => x.toLowerCase());
+    const expect = LANG_BY_COUNTRY[cc];
+    if (expect) {
+      const ok = langs.some((l) => expect.some((e) => l === e || l.startsWith(e + '-')));
+      out.push({ level: ok ? 'good' : 'warn', title: ok ? '语言与 IP 地区相符' : '语言与 IP 地区不符', text: `浏览器语言 ${f.languages.slice(0, 3).join(', ')}；IP 位于 ${s.location.country || cc}` });
+    } else out.push({ level: 'info', title: '语言', text: `浏览器语言 ${f.languages.slice(0, 3).join(', ')}（该地区未收录常用语言，不作判断）` });
+    // WebRTC
+    if (state.rtc) {
+      const v = rtcVerdict();
+      out.push({ level: v.level === 'bad' ? 'bad' : v.level === 'warn' ? 'warn' : 'good', title: `WebRTC：${v.short}`, text: v.envText });
+    }
+    // IPv4 / IPv6 出口
+    if (state.v4 && state.v6 && state.self) {
+      out.push({ level: 'info', title: '双栈网络', text: '同时具有 IPv4 与 IPv6 出口；若使用代理，请确认两者都经过代理。' });
+    }
+    if (f.webdriver) out.push({ level: 'warn', title: '自动化浏览器', text: '检测到 navigator.webdriver，网站可能识别为自动化环境。' });
+    return out;
+  }
+  function renderEnv() {
+    const list = envChecks();
+    if (!list) return;
+    $('#envList').innerHTML = list.map((c) => `<li class="${c.level}"><span class="ck">${icon(LEVEL_ICON[c.level])}</span><div><b>${esc(c.title)}</b><p>${esc(c.text)}</p></div></li>`).join('');
+    const worst = list.some((c) => c.level === 'bad') ? 'bad' : list.some((c) => c.level === 'warn') ? 'warn' : 'good';
+    $('#envDot').className = 'status-dot ' + worst;
+  }
+
+  // ---------- WebRTC ----------
+  let rtcRunning = false;
+  async function checkRtc() {
+    if (rtcRunning) return; rtcRunning = true;
+    const btn = $('#rtcBtn'); btn.disabled = true;
+    state.rtc = null;
+    setVerdict('loading', '正在检测…', '正在通过 STUN 服务器收集候选地址，通常需要 2–6 秒。');
+    try { state.rtc = await window.CMIWebRTC.run(CFG.stunServers || ['stun:stun.cloudflare.com:3478', 'stun:stun.miwifi.com:3478']); }
+    catch (e) { state.rtc = { supported: false, candidates: [], error: String(e) }; }
+    rtcRunning = false; btn.disabled = false;
+    renderRtc(); renderEnv();
+  }
+  $('#rtcBtn').addEventListener('click', checkRtc);
+
+  function knownIps() { return [state.self?.ip, state.v4, state.v6].filter(Boolean); }
+  function rtcVerdict() {
+    const r = state.rtc;
+    if (!r.supported) return { level: 'good', title: '浏览器未启用 WebRTC', text: '当前浏览器不支持或已禁用 WebRTC，网页无法通过它获取你的地址。', short: '已禁用', envText: 'WebRTC 不可用，不会泄露地址。' };
+    const pub = r.candidates.filter((c) => c.kind === 'public');
+    const known = knownIps();
+    const leaked = pub.filter((c) => !known.includes(c.address));
+    const priv = r.candidates.filter((c) => c.kind === 'private');
+    if (leaked.length) return { level: 'bad', title: '可能存在 WebRTC 泄露', text: `WebRTC 暴露了与本站所见不同的公网 IP：${[...new Set(leaked.map((c) => c.address))].join('、')}。如果你正在使用代理 / VPN，真实 IP 可能已被网页获取。`, short: '发现不同的公网 IP', envText: `WebRTC 公网 IP 与 HTTP 所见不一致：${leaked[0].address}` };
+    if (priv.length) return { level: 'warn', title: '暴露了内网地址', text: `未发现额外公网 IP，但 WebRTC 暴露了内网地址 ${priv.map((c) => c.address).join('、')}，可被用于辅助追踪。`, short: '暴露内网地址', envText: 'WebRTC 暴露了内网地址，但公网 IP 一致。' };
+    if (pub.length) return { level: 'good', title: '未发现泄露', text: 'WebRTC 获取到的公网 IP 与本站看到的一致。', short: '一致', envText: 'WebRTC 公网 IP 与 HTTP 所见一致。' };
+    if (r.candidates.length) return { level: 'good', title: '未发现泄露', text: '只收集到 mDNS 隐藏地址，STUN 未返回公网地址（可能 UDP 被拦截或已开启保护）。', short: '未获取到公网 IP', envText: 'WebRTC 未暴露公网 IP。' };
+    return { level: 'good', title: '未收集到任何候选地址', text: '可能是浏览器或网络阻止了 WebRTC / UDP，这对隐私是好事。', short: '无候选地址', envText: 'WebRTC 未返回任何地址。' };
+  }
+  function setVerdict(level, title, text) {
+    const v = $('#rtcVerdict');
+    v.className = 'verdict ' + level;
+    v.innerHTML = `<span class="verdict-ico">${level === 'loading' ? '' : icon(LEVEL_ICON[level] || 'info')}</span><div><b>${esc(title)}</b><p>${esc(text)}</p></div>`;
+  }
+  function renderRtc() {
+    if (!state.rtc) return;
+    const v = rtcVerdict(); setVerdict(v.level, v.title, v.text);
+    const known = knownIps();
+    const KIND = { public: '公网', private: '内网', mdns: 'mDNS 隐藏' };
+    const TYPE = { host: 'host 本机', srflx: 'srflx 反射', prflx: 'prflx', relay: 'relay 中继' };
+    const rows = state.rtc.candidates.map((c) => {
+      let kind = `<span class="badge ${c.kind === 'public' ? (known.includes(c.address) ? 'good' : 'bad') : c.kind === 'private' ? 'warn' : 'soft'}">${KIND[c.kind]}${c.family ? ' ' + c.family : ''}${c.kind === 'public' && known.includes(c.address) ? ' · 与本站一致' : c.kind === 'public' ? ' · 不一致' : ''}</span>`;
+      return `<tr><td class="mono">${esc(c.address)}</td><td>${kind}</td><td>${esc(TYPE[c.type] || c.type)}</td><td>${esc(c.protocol.toUpperCase())}</td><td class="muted">${esc(c.servers.map((s) => s.replace(/^stun:/, '')).join(', '))}</td></tr>`;
+    });
+    $('#rtcTable tbody').innerHTML = rows.join('') || `<tr><td colspan="5" class="muted">${state.rtc.supported ? '没有收集到候选地址' : '浏览器不支持 WebRTC'}</td></tr>`;
+  }
+
+  // ---------- 指纹 ----------
+  function renderFp(f) {
+    const gl = f.webgl || {};
+    const items = [
+      ['User-Agent', f.userAgent, 'wide mono'],
+      ['平台', f.platform || '—'], ['语言', f.languages.join(', ') || '—'], ['时区', `${f.timezone || '—'}（${f.tzOffset}）`],
+      ['屏幕分辨率', `${f.screen} @${f.dpr}x`], ['视口大小', f.viewport], ['色深', `${f.colorDepth} 位`],
+      ['CPU 逻辑核心', f.cores ?? '不可用'], ['设备内存', f.memory ? `≥ ${f.memory} GB` : '不可用'], ['触控点数', f.touch],
+      ['Canvas 指纹', f.canvas || '不可用', 'mono'], ['Cookie', f.cookies ? '已启用' : '已禁用'], ['Do Not Track', f.dnt ? '已开启' : '未开启'],
+      ['WebGL 厂商', gl.supported ? gl.vendor || '—' : '不支持'], ['WebGL 渲染器', gl.supported ? gl.renderer || '—' : '不支持', 'half'],
+      [`已安装字体（检测 ${f.fonts.length} 项命中）`, f.fonts.length ? f.fonts.join('、') : '未检测到常见字体', 'wide'],
+    ];
+    $('#fpGrid').innerHTML = items.map(([k, v, cls = '']) => `<div class="card fp-item ${cls.replace('mono', '')}"><div class="k">${esc(k)}</div><div class="v ${cls.includes('mono') ? 'mono' : ''}">${esc(v)}</div></div>`).join('');
+    $('#fpHash').textContent = f.hash;
+  }
+
+  // ---------- 启动 ----------
+  (async function init() {
+    const q = new URLSearchParams(location.search).get('ip');
+    if (q) $('#searchInput').value = q;
+    window.CMIFingerprint.collect().then((f) => { state.fp = f; renderFp(f); renderEnv(); });
+    detectStack();
+    try {
+      await loadSelf();
+      if (!q) renderIp(state.self);
+    } catch (e) {
+      if (!q) renderIpError(e.message);
+      $('#envList').innerHTML = `<li class="info"><span class="ck">${icon('info')}</span><div><b>无法获取本站所见 IP</b><p>${esc(e.message)}</p></div></li>`;
+      checkRtc();
+    }
+    if (q) show(q);
+  })();
+})();

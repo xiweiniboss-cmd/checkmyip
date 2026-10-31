@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>checkmyip · IP 信息与纯净度检测</title>
+  <meta name="description" content="查看你的公网 IP、归属地、运营商与 ASN，判断家庭宽带还是机房 IP，检测 WebRTC 泄露与浏览器环境一致性。">
+  <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/theme-init.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/" aria-label="checkmyip 首页">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg#logo"/></svg>
+        <span class="brand-name">check<b>my</b>ip</span>
+      </a>
+      <nav class="nav" aria-label="页面导航">
+        <a href="#ip" class="active">IP 信息</a>
+        <a href="#webrtc">WebRTC</a>
+        <a href="#fingerprint">浏览器指纹</a>
+        <a href="#dns">DNS 泄露</a>
+      </nav>
+      <button class="icon-btn" id="themeBtn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
+        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg#sun"/></svg>
+        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg#moon"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- ============ IP 信息 ============ -->
+    <section id="ip" class="section">
+      <div class="hero">
+        <div>
+          <h1 id="heroTitle">你的 IP 纯净吗？</h1>
+          <p class="sub">查看本站看到的公网 IP、归属地与运营商，判断是家庭宽带还是机房 IP，并给出纯净度参考评分。</p>
+        </div>
+        <form class="search" id="searchForm" autocomplete="off">
+          <svg viewBox="0 0 24 24" class="search-ico" aria-hidden="true"><use href="/assets/icons.svg#search"/></svg>
+          <input id="searchInput" name="ip" type="text" inputmode="text" spellcheck="false" placeholder="输入 IPv4 / IPv6 地址查询，例如 8.8.8.8" aria-label="要查询的 IP 地址">
+          <button class="btn primary" type="submit">查询</button>
+          <button class="btn ghost" type="button" id="mineBtn" hidden>我的 IP</button>
+        </form>
+      </div>
+
+      <div class="grid grid-main">
+        <article class="card ip-card" id="ipCard" aria-live="polite">
+          <div class="card-head">
+            <span class="eyebrow" id="ipEyebrow">本站看到的你的 IP</span>
+            <div class="chips" id="ipVersionChips"></div>
+          </div>
+          <div class="ip-line">
+            <span class="ip-value skel" id="ipValue">000.000.000.000</span>
+            <button class="icon-btn sm" id="copyBtn" type="button" title="复制 IP" aria-label="复制 IP"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg#copy"/></svg></button>
+          </div>
+          <div class="badges" id="ipBadges"><span class="badge skel">加载中</span></div>
+          <dl class="kv" id="ipKv">
+            <div><dt>国家 / 地区</dt><dd class="skel">——————</dd></div>
+            <div><dt>省份 / 城市</dt><dd class="skel">——————</dd></div>
+            <div><dt>ASN</dt><dd class="skel">——————</dd></div>
+            <div><dt>运营商 / 组织</dt><dd class="skel">——————</dd></div>
+            <div><dt>时区</dt><dd class="skel">——————</dd></div>
+            <div><dt>反向解析</dt><dd class="skel">——————</dd></div>
+          </dl>
+          <div class="loc-strip" id="locStrip" hidden></div>
+        </article>
+
+        <article class="card score-card" id="scoreCard">
+          <div class="card-head"><span class="eyebrow">纯净度评分</span><span class="hint-tag" title="基于规则的参考值">规则参考</span></div>
+          <div class="gauge" id="gauge">
+            <svg viewBox="0 -8 200 140" aria-hidden="true">
+              <defs>
+                <linearGradient id="gaugeGrad" x1="0" x2="1" y1="0" y2="0">
+                  <stop offset="0" stop-color="#ef4444"/><stop offset=".5" stop-color="#f59e0b"/><stop offset="1" stop-color="#10b981"/>
+                </linearGradient>
+              </defs>
+              <path class="gauge-track" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100"/>
+              <path class="gauge-bar" id="gaugeBar" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100" stroke-dasharray="0 100"/>
+            </svg>
+            <div class="gauge-center">
+              <div class="gauge-num" id="scoreNum">--</div>
+              <div class="gauge-label" id="scoreLabel">计算中</div>
+            </div>
+          </div>
+          <p class="score-summary" id="scoreSummary"></p>
+          <div class="score-meta">
+            <div><span>网络类型</span><b id="typeText">—</b></div>
+            <div><span>风险等级</span><b id="riskText">—</b></div>
+            <div><span>判断置信度</span><b id="confText">—</b></div>
+          </div>
+        </article>
+
+        <article class="card signals-card" id="signalsCard">
+          <div class="card-head"><span class="eyebrow">评分依据</span><span class="muted small" id="srcLine"></span></div>
+          <ul class="signals" id="signals"><li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li></ul>
+          <p class="note" id="scoreNote">评分基于公开 IP 段、ASN 名单、反向解析与 Tor 出口列表等规则推断，仅供参考，不代表任何平台的真实风控结果。</p>
+        </article>
+
+        <div class="side-stack">
+          <article class="card" id="stackCard">
+            <div class="card-head"><span class="eyebrow">IPv4 / IPv6 连通性</span></div>
+            <ul class="stack-list" id="stackList">
+              <li><span class="proto">IPv4</span><span class="val skel">检测中</span></li>
+              <li><span class="proto">IPv6</span><span class="val skel">检测中</span></li>
+            </ul>
+            <p class="muted small" id="stackNote">本站优先看到的是：<b id="seenProto">—</b></p>
+          </article>
+          <article class="card" id="envCard">
+            <div class="card-head"><span class="eyebrow">环境一致性</span><span class="status-dot" id="envDot"></span></div>
+            <ul class="checks" id="envList"><li class="skel-row"></li><li class="skel-row"></li></ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ WebRTC ============ -->
+    <section id="webrtc" class="section">
+      <div class="section-head">
+        <div>
+          <h2>WebRTC 泄露检测</h2>
+          <p class="sub">网页可以通过 WebRTC 向 STUN 服务器探测你的真实地址。如果这里出现了与上方不同的公网 IP，说明代理 / VPN 可能被绕过。</p>
+        </div>
+        <button class="btn" id="rtcBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg#refresh"/></svg>重新检测</button>
+      </div>
+      <article class="card">
+        <div class="verdict" id="rtcVerdict"><span class="verdict-ico"></span><div><b>正在检测…</b><p>正在通过 STUN 服务器收集候选地址，通常需要 2–6 秒。</p></div></div>
+        <div class="table-wrap">
+          <table class="table" id="rtcTable">
+            <thead><tr><th>发现的地址</th><th>类别</th><th>候选类型</th><th>协议</th><th>STUN 服务器</th></tr></thead>
+            <tbody><tr><td colspan="5" class="muted">等待结果…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="note">使用的 STUN 服务器：<code>stun.cloudflare.com:3478</code>、<code>stun.miwifi.com:3478</code>。mDNS（xxx.local）表示浏览器已隐藏内网地址，属于正常保护。</p>
+      </article>
+    </section>
+
+    <!-- ============ 指纹 ============ -->
+    <section id="fingerprint" class="section">
+      <div class="section-head">
+        <div>
+          <h2>浏览器指纹概览</h2>
+          <p class="sub">网站无需 Cookie 也能读取的浏览器特征。所有计算均在本地完成，不会上传。</p>
+        </div>
+        <div class="fp-hash"><span>综合指纹</span><code id="fpHash">计算中</code></div>
+      </div>
+      <div class="grid grid-fp" id="fpGrid"></div>
+    </section>
+
+    <!-- ============ DNS ============ -->
+    <section id="dns" class="section">
+      <div class="section-head"><div><h2>DNS 泄露检测</h2><p class="sub">检测你的 DNS 查询实际由哪些解析服务器发出，判断是否绕过了代理。</p></div></div>
+      <article class="card coming">
+        <svg viewBox="0 0 24 24" class="coming-ico"><use href="/assets/icons.svg#dns"/></svg>
+        <div>
+          <b>第二期上线</b>
+          <p>DNS 泄露检测需要本站自有域名和权威 DNS 服务器来记录解析来源，目前正在准备中。</p>
+        </div>
+        <span class="badge soft">即将推出</span>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div>
+        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
+        <p class="muted small">免责声明：本站结果由公开数据和规则推断得出，可能存在误差，仅供参考，不构成任何平台风控结论。查询其他 IP 时会调用第三方公共接口获取归属地。</p>
+      </div>
+      <p class="muted small" id="dataMeta">数据更新：—</p>
+    </div>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/config.js"></script>
+  <script src="/assets/fp.js"></script>
+  <script src="/assets/webrtc.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
