@@ -1,6 +1,6 @@
 {
   "name": "checkmyip",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "description": "checkmyip — IP 信息与纯净度检测（Cloudflare Worker + 静态资源）",
   "type": "module",

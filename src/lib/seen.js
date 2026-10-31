@@ -72,6 +72,8 @@ export const globalPausedToday = (env, now = Date.now()) => globalPaused === `${
  * - 全站当天新增行数达到 seenGlobalCap 后暂停（paused）：计数器 seen_daily 与单 IP 计数在同一条查询里读出（1 次往返），
  *   写入（条件：计数器 < 上限）与计数器 +1（条件：确实写入了）在同一个 D1 batch / 事务里，并发也不会超额；
  *   暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。
+ * - 条件写入没写进去时，先按主键确认本指纹是否已被并发的同一浏览器写入（→ 已计入，不记满额），
+ *   只有本指纹确实不在、且上限确实已到时才算满额 / 暂停。
  * 返回 { inserted, capped, dup, paused }
  */
 export async function recordSeen(env, parsed, fp, now = Date.now()) {
@@ -87,9 +89,9 @@ export async function recordSeen(env, parsed, fp, now = Date.now()) {
     const hit = await env.DB.prepare('SELECT 1 AS x FROM ip_seen WHERE ip_hash = ?1 AND fp_hash = ?2 AND day = ?3').bind(ih, fh, day).first();
     return { inserted: false, capped: ipMemo, dup: !!hit, paused: globalPaused === pausedKey, memo: true };
   }
-  const row = await env.DB.prepare(
-    'SELECT COUNT(*) AS n, COUNT(CASE WHEN fp_hash = ?2 THEN 1 END) AS mine, (SELECT n FROM seen_daily WHERE day = ?3) AS g FROM ip_seen WHERE ip_hash = ?1 AND day = ?3',
-  ).bind(ih, fh, day).first();
+  // 单 IP 当天行数、本指纹是否已计入（主键）、全站计数器：一次往返读出
+  const STATE_SQL = 'SELECT COUNT(*) AS n, COUNT(CASE WHEN fp_hash = ?2 THEN 1 END) AS mine, (SELECT n FROM seen_daily WHERE day = ?3) AS g FROM ip_seen WHERE ip_hash = ?1 AND day = ?3';
+  const row = await env.DB.prepare(STATE_SQL).bind(ih, fh, day).first();
   const n = Number(row?.n || 0);
   const g = Number(row?.g || 0);
   const paused = g >= gcap;
@@ -114,11 +116,18 @@ export async function recordSeen(env, parsed, fp, now = Date.now()) {
     if (capped) remember(memoKey, cap);
     return { inserted: true, capped, dup: false, paused: false };
   }
-  // 没写进去又不是重复 → 并发下刚好被别的请求占满（单 IP 或全站）；再点查一次计数器区分原因
-  const g2 = Number((await env.DB.prepare('SELECT n FROM seen_daily WHERE day = ?1').bind(day).first())?.n || 0);
-  if (g2 >= gcap) { globalPaused = pausedKey; return { inserted: false, capped: false, dup: false, paused: true }; }
-  remember(memoKey, cap);
-  return { inserted: false, capped: true, dup: false, paused: false };
+  // 没写进去有三种可能，重新读一次状态区分（不能直接当成「满额」）：
+  // ① 同一浏览器的另一个请求（如两个标签页）刚写入了同一主键 → INSERT OR IGNORE 忽略。这是「已计入」，
+  //    不记满额、不暂停，否则这个 IP 当天的新设备都会被挡掉；
+  // ② 全站计数器已达上限 → 暂停；③ 单 IP 行数已达上限 → 满额（记入内存）。
+  // 三者都不是（理论上只有跨日等极端时序）→ 只返回「未写入」，不记任何状态，下次请求重新判断。
+  const row2 = await env.DB.prepare(STATE_SQL).bind(ih, fh, day).first();
+  const n2 = Number(row2?.n || 0);
+  const g2 = Number(row2?.g || 0);
+  if (Number(row2?.mine || 0) > 0) return { inserted: false, capped: n2 >= cap, dup: true, paused: g2 >= gcap };
+  if (g2 >= gcap) { globalPaused = pausedKey; return { inserted: false, capped: n2 >= cap, dup: false, paused: true }; }
+  if (n2 >= cap) { remember(memoKey, cap); return { inserted: false, capped: true, dup: false, paused: false }; }
+  return { inserted: false, capped: false, dup: false, paused: false };
 }
 function remember(k, cap) {
   if (cappedMemo.size >= CAPPED_MEMO_MAX) cappedMemo.clear();

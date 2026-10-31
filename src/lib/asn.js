@@ -159,6 +159,12 @@ const PTR_NOT_RES = new Set(['vpn', 'proxy', 'proxies', 'node', 'nodes', 'mail',
   'backbone', 'ix', 'peer', 'nat', 'cgnat', 'vm', 'container', 'worker', 'bot', 'crawl', 'crawler', 'scan', 'scanner']);
 // 服务类词的粘连写法（webhost、vpnpool、myproxy …）：在拆不开的词里按子串匹配；只收足够长 / 独特的片段（不含 mx、ns 之类）
 const PTR_NOT_RES_SUB = ['host', 'vpn', 'proxy', 'mail', 'smtp', 'relay', 'gateway', 'router', 'crawler', 'scanner'];
+// 机房暗示词：本身不足以判机房（dc、rack 也可能是运营商机房 / 区域代号），但出现在主机部分时，
+// 「host + 编号」不再按运营商家宽写法放行（dedi-host-1-2-3-4 → 无信号）。dedi 另按子串查（dedibox、mydedi）。
+// dedicated / vps / server / srv / colo / cloud / hosting 等本来就是机房词，见 PTR_DC。
+const PTR_DC_HINT = new Set(['dedi', 'ded', 'dc', 'rack', 'metal', 'bm', 'kvm', 'xen', 'virt', 'virtual']);
+// 机房子串里较「弱」的：cloud 常见于运营商品牌（mcloud、cloudnet 等），PTR 同时有明确家宽词时只取消家宽判断，不判机房
+const PTR_DC_SUB_WEAK = new Set(['cloud']);
 // 国家顶级域下常见的二级后缀（com.mx、co.uk、net.br …），用来粗略确定「可注册域名」（不引入完整的公共后缀列表）
 const PTR_SLD = new Set(['com', 'net', 'org', 'co', 'ne', 'or', 'ac', 'ad', 'go', 'gov', 'gob', 'edu', 'mil', 'nic', 'ltd', 'plc',
   'sch', 'info', 'biz', 'gen', 'nom', 'int']);
@@ -209,9 +215,14 @@ export function classifyPtr(ptr) {
   // 拆不开的词：不是任何已知词、也不能拆成家宽复合词（webhost、cloudprovider、fiberhost …）
   const glued = tokens.filter((t) => !PTR_DC.has(t) && !PTR_NOT_RES.has(t) && !PTR_STATIC.includes(t) && !resCompound(t));
 
-  const dc = words.find((t) => PTR_DC.has(t)) || PTR_DC_DOMAINS.find((k) => low.includes(k))
-    || PTR_DC_SUB.reduce((hit, k) => hit || (glued.some((t) => t.includes(k)) ? k : null), null);
+  const dc = words.find((t) => PTR_DC.has(t)) || PTR_DC_DOMAINS.find((k) => low.includes(k));
   if (dc) return { signal: 'datacenter', keyword: dc };
+  const dcSub = PTR_DC_SUB.find((k) => glued.some((t) => t.includes(k)));
+  if (dcSub) {
+    // dsl.mcloud.ru：有明确家宽词时 cloud 子串只取消家宽判断（无信号）；cloudprovider 这类没有家宽词的仍判机房
+    if (PTR_DC_SUB_WEAK.has(dcSub) && tokens.some((t) => resCompound(t))) return { signal: null, blockedBy: dcSub };
+    return { signal: 'datacenter', keyword: dcSub };
+  }
   const st = PTR_STATIC.find((k) => tokens.includes(k));
   if (st) return { signal: 'static', keyword: st };
 
@@ -219,6 +230,9 @@ export function classifyPtr(ptr) {
   const hostNumbered = /(^|[^a-z0-9])host-?\d/.test(hostStr);
   const hostBare = /(^|[^a-z0-9])host(?!-?\d)(?![a-z])/.test(hostStr);
   const hostTokens = tokensOf(hostStr);
+  // 主机部分有机房暗示词（dedi-host-1-2-3-4、host-1-2-3-4.dc2…）时，host + 编号不放行
+  const dcHint = hostNumbered && (hostTokens.find((t) => PTR_DC_HINT.has(t)) || (hostTokens.some((t) => glued.includes(t) && t.includes('dedi')) ? 'dedi' : null));
+  if (dcHint) return { signal: null, blockedBy: `host（${dcHint}）` };
   const block = hostTokens.find((t) => PTR_NOT_RES.has(t) && !(t === 'host' && !hostBare))
     || PTR_NOT_RES_SUB.reduce((hit, k) => hit || (glued.some((t) => t.includes(k)) ? k : null), null);
   if (block) return { signal: null, blockedBy: block };

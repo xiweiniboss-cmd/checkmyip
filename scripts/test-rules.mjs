@@ -113,7 +113,7 @@ for (const [p, kw] of Object.entries(v033Pos)) {
 }
 const v033Neg = {
   'webhost-1.example.net': null, '1-2-3-4.webhost.example.net': null, 'webhost.dsl.example.net': null,
-  'cloudprovider-1.example.com': 'datacenter', '1-2-3-4.cloudprovider.com': 'datacenter', 'dsl-1.mycloudnet.example': 'datacenter',
+  'cloudprovider-1.example.com': 'datacenter', '1-2-3-4.cloudprovider.com': 'datacenter', 'dsl-1.mycloudnet.example': null,
   'fiberhost-1.example.net': null, 'vpn-pool-1.example.net': null, '1-2-3-4.vpnpool.example': null, 'myproxy-pool.example': null,
   'gke-prod-default-pool-1a2b3c.example.net': 'datacenter', 'mx.dynect.net': null, 'mx1.dsl.example.com.mx': null,
   'host.dsl.example.net': null, 'host.example.com.mx': null, 'mailhost-1-2-3-4.example.net': null, 'host123.example.net': null,
@@ -131,6 +131,26 @@ for (const [p, exp] of Object.entries(v033Neg)) {
 }
 eq('公共后缀拆分', [splitPtrLabels('a.b.prod-infinitum.com.mx'), splitPtrLabels('mx.dynect.net'), splitPtrLabels('x.example.co.uk'), splitPtrLabels('localhost')],
   [{ host: ['a', 'b'], reg: 'prod-infinitum', suffix: ['com', 'mx'] }, { host: ['mx'], reg: 'dynect', suffix: ['net'] }, { host: ['x'], reg: 'example', suffix: ['co', 'uk'] }, { host: [], reg: 'localhost', suffix: [] }]);
+// v0.3.4：host + 编号前有机房暗示词时不放行；cloud 子串遇到明确家宽词只取消家宽、不判机房
+const v034 = {
+  'dedi-host-1-2-3-4.example.com': [null, 'host（dedi）'], 'dedibox-host-1-2-3-4.example.com': [null, 'host（dedi）'],
+  'host-1-2-3-4.dc2.example.com': [null, 'host（dc）'], 'rack7-host-1-2-3-4.example.net': [null, 'host（rack）'],
+  'dedicated-host-1-2-3-4.example.com': ['datacenter', undefined], 'vps-host-1-2-3-4.example.com': ['datacenter', undefined],
+  'server-host-1-2-3-4.example.com': ['datacenter', undefined], 'srv-host-1-2-3-4.example.com': ['datacenter', undefined],
+  'colo-host-1-2-3-4.example.com': ['datacenter', undefined], 'cloud-host-1-2-3-4.example.com': ['datacenter', undefined],
+  'hosting-host-1-2-3-4.example.com': ['datacenter', undefined],
+  'dsl.mcloud.ru': [null, 'cloud'], 'dsl-1-2-3-4.mcloud.ru': [null, 'cloud'], 'pppoe-1.cloudnet.example': [null, 'cloud'],
+  'cloudprovider-1.example.com': ['datacenter', undefined], '1-2-3-4.mcloud.ru': ['datacenter', undefined],
+  'dsl.webhosting.example': ['datacenter', undefined], 'dynamic-1-2-3-4.cloud.example': ['datacenter', undefined],
+};
+for (const [p, [sig, by]] of Object.entries(v034)) {
+  const c = classifyPtr(p);
+  eq(`v0.3.4 ${p}`, [c.signal, c.blockedBy], [sig, by]);
+  const r = run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...c } });
+  eq(`v0.3.4 ${p}：未知 ASN 不判家宽`, r.type === 'residential', false);
+}
+// 机房暗示词不影响正常的 host + 编号家宽
+for (const p of ['host86-128-12-34.range86-128.btcentralplus.com', 'host-1-2-3-4.voo.be', 'host-109-89-10-20.dynamic.voo.be']) eq(`v0.3.4 仍为家宽 ${p}`, classifyPtr(p).signal, 'residential');
 // 外部数据（ipapi.is）标记机房 + 家宽 PTR：类型为数据中心，PTR 不加分
 {
   const p = '85-195-230-77.fiber7.init7.net';

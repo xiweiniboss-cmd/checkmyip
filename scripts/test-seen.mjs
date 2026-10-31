@@ -171,6 +171,33 @@ _resetCappedMemo();
   eq('并发 1000、全站上限 50：ip_seen ≤ 50 且计数器 = 行数', [rows, ctr, res.filter((r) => r.inserted).length, res.filter((r) => r.paused).length], [50, 50, 50, 950]);
 }
 _resetCappedMemo();
+// v0.3.4：同一浏览器并发上报两次（两个标签页）：主键冲突不是「满额」——只 1 行、另一次为「已计入」、不标记满额，之后新指纹照常写入
+{
+  const dEnv = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'dup-salt-0123456789abcdef' };
+  const ip = parseIP('203.0.113.77');
+  const two = await Promise.all([recordSeen(dEnv, ip, fpN(90001), now), recordSeen(dEnv, ip, fpN(90001), now)]);
+  const rows = () => dEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c;
+  eq('并发同指纹两次：只写 1 行', rows(), 1);
+  eq('并发同指纹两次：一次写入、一次已计入，都不是满额 / 暂停',
+    two.map((r) => [r.inserted, r.dup, r.capped, r.paused]).sort(), [[false, true, false, false], [true, false, false, false]]);
+  const next = await recordSeen(dEnv, ip, fpN(90002), now);
+  eq('并发同指纹之后：同 IP 新指纹仍然写入（没有被记成满额）', [next.inserted, next.capped, next.memo ?? false, rows()], [true, false, false, 2]);
+  // 更多并发：同一指纹 20 次 + 另外 3 个新指纹同时到达
+  const many = await Promise.all([...Array.from({ length: 20 }, () => recordSeen(dEnv, ip, fpN(90003), now)), ...[90004, 90005, 90006].map((k) => recordSeen(dEnv, ip, fpN(k), now))]);
+  eq('并发同指纹 ×20 + 3 个新指纹：共 6 行、1+3 次写入、19 次已计入、无满额', [rows(), many.filter((r) => r.inserted).length, many.filter((r) => r.dup).length, many.filter((r) => r.capped).length], [6, 4, 19, 0]);
+  eq('计数器与行数一致', dEnv.DB.raw.prepare('SELECT n FROM seen_daily').get().n, 6);
+}
+_resetCappedMemo();
+// 并发同指纹 + 单 IP 真的满额：满额仍然正确识别（上限 2，已有 1 行；同指纹 ×2 与 2 个新指纹并发）
+{
+  const dEnv = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'dup-salt-0123456789abcdef', SEEN_DAILY_CAP: '2' };
+  const ip = parseIP('203.0.113.78');
+  await recordSeen(dEnv, ip, fpN(91000), now);
+  const res = await Promise.all([recordSeen(dEnv, ip, fpN(91000), now), recordSeen(dEnv, ip, fpN(91000), now), recordSeen(dEnv, ip, fpN(91001), now), recordSeen(dEnv, ip, fpN(91002), now)]);
+  eq('上限 2：同指纹两次为已计入，两个新指纹一写一满额', [res[0].dup, res[1].dup, res.filter((r) => r.inserted).length, res.filter((r) => !r.dup && !r.inserted && r.capped).length,
+    dEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c], [true, true, 1, 1, 2]);
+}
+_resetCappedMemo();
 // 清理同时删除 30 天前的计数器行
 {
   const cEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef' };
