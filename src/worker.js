@@ -13,7 +13,7 @@ import { estimateSharing } from './lib/sharing.js';
 import { seenStatus, seenCap, seenGlobalCap, globalPausedToday, SEEN_PAUSED_MESSAGE, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
 import meta from './data/meta.json';
 
-const VERSION = '0.3.2';
+const VERSION = '0.3.3';
 
 // ---------- 小工具 ----------
 function json(data, status = 200, extra = {}) {

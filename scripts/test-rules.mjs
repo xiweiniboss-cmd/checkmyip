@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 规则测试：ASN / PTR 分类与评分（含“数据不完整”与信誉库提示）
-import { classifyAsn, classifyPtr } from '../src/lib/asn.js';
+import { classifyAsn, classifyPtr, splitPtrLabels } from '../src/lib/asn.js';
 import { analyze, INCOMPLETE_CAP, UNKNOWN_ASN_PENALTY, UNKNOWN_ASN_NOTE } from '../src/lib/score.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
@@ -9,9 +9,9 @@ const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify
 const ptr = {
   'c-73-0-0-1.hsd1.il.comcast.net': 'residential', 'pool-71-1-2-3.nycmny.fios.verizon.net': 'residential',
   '1.1.222.114.broad.nj.js.dynamic.163data.com.cn': 'residential', '123.45.67.89.static.bjtelecom.net': 'static',
-  'host-1-2-3-4.isp.net': null, 'ghost.example.org': null, 'localhost': null, 'dns.google': null, 'one.one.one.one': null,
+  'host-1-2-3-4.isp.net': 'residential', 'ghost.example.org': null, 'localhost': null, 'dns.google': null, 'one.one.one.one': null,
   'vps123.example.com': 'datacenter', 'static.1.2.3.4.clients.your-server.de': 'datacenter',
-  'ec2-3-1-2-3.compute-1.amazonaws.com': 'datacenter', 'srv-hosting.example.net': 'datacenter', 'cloudflare-dns.com': null,
+  'ec2-3-1-2-3.compute-1.amazonaws.com': 'datacenter', 'srv-hosting.example.net': 'datacenter', 'cloudflare-dns.com': 'datacenter',
 };
 for (const [p, exp] of Object.entries(ptr)) eq(`PTR ${p}`, classifyPtr(p).signal, exp);
 
@@ -64,7 +64,7 @@ for (const p of resPtrs) {
 // 服务器类词优先：即使同时带家宽词也判为服务器
 for (const p of ['dsl-vps-1.example.net', 'customer-1.hosting.example.com', 'pool1.myvpsserver.example', 'cloud-ppp.example']) eq(`服务器词优先 ${p}`, classifyPtr(p).signal, 'datacenter');
 // 不应误判为家宽
-for (const p of ['dns9.quad9.net', 'r1win8.core.init7.net', 'mail.liverpool.example', 'router.blackpool.example', 'host-1-2-3-4.isp.net']) eq(`非家宽 PTR ${p}`, classifyPtr(p).signal, null);
+for (const p of ['dns9.quad9.net', 'r1win8.core.init7.net', 'mail.liverpool.example', 'router.blackpool.example', 'host.isp.net', 'webhost.isp.net']) eq(`非家宽 PTR ${p}`, classifyPtr(p).signal, null);
 // Quad9 9.9.9.9：仍为机房，PTR 不影响
 const q9p = run(19281, 'QUAD9-AS-1', { ptr: { ptr: 'dns9.quad9.net', ...classifyPtr('dns9.quad9.net') } });
 eq('Quad9 + PTR dns9.quad9.net 仍为机房、非低风险', [q9p.type, q9p.risk !== 'low'], ['datacenter', true]);
@@ -78,7 +78,7 @@ eq('内置 ASN 不受影响', [run(7922, 'Comcast').confidenceText, run(7922, 'C
 // v0.3.2：家宽关键词按整词 / 可完整拆分的复合词匹配；服务 / 平台类词不判家宽
 const negPtrs = { 'vpn-pool-1.example.net': null, 'vpn-pool-1-2-3-4.example.com': null, 'gke-prod-default-pool-1a2b3c.example.net': 'datacenter',
   'fiberhost-1.example.net': null, 'mx.dynect.net': null, 'mx1.dsl.example.net': null, 'proxy-7.pool.example.com': null,
-  'node-12.dsl.example.net': null, 'mail.cable.example.org': null, 'smtp-out.customer.example.net': null, 'host-1-2-3-4.dsl.example.net': null,
+  'node-12.dsl.example.net': null, 'mail.cable.example.org': null, 'smtp-out.customer.example.net': null,
   'k8s-worker-pool-3.example.io': 'datacenter', 'aks-nodepool1-123.example.net': 'datacenter', 'cluster-1.pool.example.net': 'datacenter',
   'my-cloud-pool.example': 'datacenter', 'fiberhosting.example.net': 'datacenter', 'serverpool.example.net': 'datacenter',
   'dynect.net': null, 'liverpool.example': null, 'clienthost.example': null, 'dslforum.example.org': null, 'poolside.example': null,
@@ -93,6 +93,44 @@ const posPtrs = { 'c-73-0-0-1.hsd1.il.comcast.net': 'hsd', '85-195-230-77.fiber7
   '77-57-100-20.dclient.hispeed.ch': 'client（dclient）', 'cablemodem-1.example.org': 'cable（cablemodem）', '1-2-3-4.customers.example.ph': 'customers',
   'ip-1-2-3-4.hsi03.unitymediagroup.de': 'hsi', 'pppoe-1-2-3-4.example.de': 'pppoe', 'xdsl-1-2.example.it': 'xdsl', 'dynamicip-1.example.net': 'dynamic（dynamicip）' };
 for (const [p, kw] of Object.entries(posPtrs)) eq(`家宽正例 ${p}`, [classifyPtr(p).signal, classifyPtr(p).keyword], ['residential', kw]);
+// v0.3.3：国家后缀不参与屏蔽；host+编号为运营商家宽写法；拆不开的粘连词按子串查机房 / 服务类词
+const v033Pos = {
+  'host86-128-12-34.range86-128.btcentralplus.com': 'host（host86-128-12-34）', // BT（英国）
+  'host-1-2-3-4.voo.be': 'host（host-1-2-3-4）', // VOO（比利时）
+  'host-213-219-136-1.dynamic.voo.be': 'dynamic',
+  'dsl-2-1-150-189-dynamic.prod-infinitum.com.mx': 'dsl', // Telmex Infinitum（墨西哥，.com.mx；189.150.1.2 的实际 PTR 格式）
+  'dsl-189-203-1-2.dyn.prod-infinitum.mx': 'dsl',
+  'host81-155-10-20.range81-155.btcentralplus.com': 'host（host81-155-10-20）', 'host-109-89-10-20.dynamic.voo.be': 'dynamic',
+  'customer-187-1-2-3.uninet-ide.com.mx': 'customer',
+  'pool-1-2-3-4.example.co.uk': 'pool',
+  '85-195-230-77.fiber7.init7.net': 'fiber', '77-57-100-20.dclient.hispeed.ch': 'client（dclient）',
+  'adsl-84-226-12-34.adslplus.ch': 'adsl', 'c-73-0-0-1.hsd1.fl.comcast.net': 'hsd',
+};
+for (const [p, kw] of Object.entries(v033Pos)) {
+  const c = classifyPtr(p);
+  eq(`v0.3.3 家宽正例 ${p}`, [c.signal, c.keyword], ['residential', kw]);
+  eq(`v0.3.3 家宽正例 ${p}：未知 ASN 判家宽`, run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...c } }).type, 'residential');
+}
+const v033Neg = {
+  'webhost-1.example.net': null, '1-2-3-4.webhost.example.net': null, 'webhost.dsl.example.net': null,
+  'cloudprovider-1.example.com': 'datacenter', '1-2-3-4.cloudprovider.com': 'datacenter', 'dsl-1.mycloudnet.example': 'datacenter',
+  'fiberhost-1.example.net': null, 'vpn-pool-1.example.net': null, '1-2-3-4.vpnpool.example': null, 'myproxy-pool.example': null,
+  'gke-prod-default-pool-1a2b3c.example.net': 'datacenter', 'mx.dynect.net': null, 'mx1.dsl.example.com.mx': null,
+  'host.dsl.example.net': null, 'host.example.com.mx': null, 'mailhost-1-2-3-4.example.net': null, 'host123.example.net': null,
+};
+// Telmex 另一种实际格式 acceso-<IP>：没有家宽词，但 .mx 不得把它判成服务类（signal 为 null 而不是被屏蔽成别的）
+eq('Telmex acceso-187.140.1.2.prod-infinitum.com.mx 不被 .mx 屏蔽', classifyPtr('acceso-187.140.1.2.prod-infinitum.com.mx').blockedBy, undefined);
+eq('.mx 只在主机部分才屏蔽', [classifyPtr('dsl-1-2-3-4.prod-infinitum.com.mx').signal, classifyPtr('mx.prod-infinitum.com.mx').blockedBy, classifyPtr('mx.dynect.net').blockedBy], ['residential', 'mx', 'mx']);
+eq('粘连词子串屏蔽', ['webhost-1.example.net', 'fiberhost-1.example.net', '1-2-3-4.vpnpool.example', 'host.dsl.example.net'].map((p) => classifyPtr(p).blockedBy), ['host', 'host', 'vpn', 'host']);
+eq('vpn-pool 被 vpn 屏蔽', classifyPtr('vpn-pool-1.example.net').blockedBy, 'vpn');
+for (const [p, exp] of Object.entries(v033Neg)) {
+  const c = classifyPtr(p);
+  eq(`v0.3.3 反例 ${p}`, c.signal, exp);
+  const r = run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...c } });
+  eq(`v0.3.3 反例 ${p} 不得判家宽`, r.type === 'residential', false);
+}
+eq('公共后缀拆分', [splitPtrLabels('a.b.prod-infinitum.com.mx'), splitPtrLabels('mx.dynect.net'), splitPtrLabels('x.example.co.uk'), splitPtrLabels('localhost')],
+  [{ host: ['a', 'b'], reg: 'prod-infinitum', suffix: ['com', 'mx'] }, { host: ['mx'], reg: 'dynect', suffix: ['net'] }, { host: ['x'], reg: 'example', suffix: ['co', 'uk'] }, { host: [], reg: 'localhost', suffix: [] }]);
 // 外部数据（ipapi.is）标记机房 + 家宽 PTR：类型为数据中心，PTR 不加分
 {
   const p = '85-195-230-77.fiber7.init7.net';

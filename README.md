@@ -84,15 +84,18 @@
 
 **ASN 不在内置库时看 PTR**：内置 ASN 库只收录了大运营商和云厂商，很多地区性家宽运营商（如瑞士 Init7 AS13030、Sunrise AS6730）不在库里。此时如果反向解析是宽带用户类写法，就按家庭宽带估算，置信度固定为「低」。例：`85-195-230-77.fiber7.init7.net`、`77-57-100-20.dclient.hispeed.ch`、`adsl-84-226-12-34.adslplus.ch` → 约 1–5 人；`dns9.quad9.net`（AS19281 在库内，为数据中心）不受影响。
 
-PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）按**词**匹配，不做子串匹配：
+PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）以**整词**匹配为主，只对拆不开的粘连词做少量子串检查：
 
-1. 先把 PTR 按 `.` / `-` / `_` / 数字切成字母词（`fiber7` → `fiber`，`hsd1` → `hsd`）。
-2. **机房词优先** → 判为数据中心：`server` / `srv` / `vps` / `vds` / `hosting` / `hosted` / `colo` / `dedicated` / `baremetal` / `datacenter` / `cloud` / `compute` / `ec2` 以及容器平台 `gke` / `aks` / `eks` / `k8s` / `kube` / `kubernetes` / `cluster`（另有已知云域名列表）。
+1. 先把 PTR 按 `.` / `-` / `_` / 数字切成字母词（`fiber7` → `fiber`，`hsd1` → `hsd`）。**公共后缀不参与任何判断**：最后一级（`.net`、`.mx`），以及「两字母国家域 + 常见二级」（`.com.mx`、`.co.uk`、`.net.br`，见 `PTR_SLD`）。这是简化判断，没有引入完整的公共后缀列表（PSL），少数特殊后缀可能拆得不准。
+2. **机房词优先** → 判为数据中心（整词；拆不开的粘连词里出现 `hosting` / `server` / `vps` / `datacenter` / `dedicated` / `colocation` / `kubernetes` / `cloud` 子串也算，如 `cloudprovider`、`mycloudnet`）：`server` / `srv` / `vps` / `vds` / `hosting` / `hosted` / `colo` / `dedicated` / `baremetal` / `datacenter` / `cloud` / `compute` / `ec2` 以及容器平台 `gke` / `aks` / `eks` / `k8s` / `kube` / `kubernetes` / `cluster`（另有已知云域名列表）。
 3. `static` 等 → 静态（商业）。
-4. **排除词**：出现 `vpn` / `proxy` / `node` / `mail` / `mx` / `smtp` / `host` / `ns` / `dns` / `www` / `web` / `relay` / `tor` / `exit` / `cdn` / `edge` / `gw` / `gateway` / `router` / `core` / `nat` / `vm` / `worker` 等服务 / 平台类词时，**不判家宽**（也不足以判机房，结果为「无信号」）。很多运营商用 `host-1-2-3-4` 命名家宽，所以 `host` 只排除、不算机房。
+4. **排除词**：只看**可注册域名之前的标签**（`mx.dynect.net` 的 `mx` 算；Telmex `…prod-infinitum.com.mx` 的 `mx` 是国家后缀，不算）。出现 `vpn` / `proxy` / `node` / `mail` / `mx` / `smtp` / `host` / `ns` / `dns` / `www` / `web` / `relay` / `tor` / `exit` / `cdn` / `edge` / `gw` / `gateway` / `router` / `core` / `nat` / `vm` / `worker` 等服务 / 平台类词时，**不判家宽**（也不足以判机房，结果为「无信号」）。拆不开的粘连词里出现 `host` / `vpn` / `proxy` / `mail` / `smtp` / `relay` / `gateway` / `router` / `crawler` / `scanner` 子串也一样（`webhost`、`fiberhost`、`vpnpool`、`myproxy`）。
+   - **`host` 紧跟编号不排除**：英国 BT（`host86-128-12-34.range86-128.btcentralplus.com`）、比利时 VOO（`host-109-89-10-20.dynamic.voo.be`）用 `host<数字>` / `host-<数字>` 命名家宽；这种写法不屏蔽，并且 `host` 后紧跟完整 IP 编号（`host-?\d{1,3}([.-]\d{1,3}){1,3}`）时本身就按家宽写法计（关键词显示为 `host（host86-128-12-34）`）。单独的 `host`、`host.` 开头、`webhost`、`mailhost`、`hosting`（机房）仍按上面处理；`host123.example.net` 这种只有一段数字的不算家宽（无信号）。
 5. 家宽词必须是**整词**：`ppp` / `pppoe` / `adsl` / `dsl` / `vdsl` / `xdsl` / `cable` / `kabel` / `dyn` / `dynamic` / `dynip` / `pool` / `dhcp` / `broadband` / `fiber` / `fibre` / `ftth` / `cust` / `customer(s)` / `client(s)` / `subscriber` / `user(s)` / `cpe` / `home` / `residential` / `dialup` / `hsd` / `hsi` / `mobile` 等；或者是能**完整拆成**家宽词 + 常见后缀（`d` / `s` / `x` / `plus` / `ip` / `modem` / `net` / `line`）的复合词，如 `dclient`、`adslplus`、`cablemodem`。拆不完的不算：`fiberhost`、`liverpool`、`dyndns`、`poolside` 都**不**命中。
 
-反例（测试覆盖）：`vpn-pool-1.example.net` → 无信号；`gke-prod-default-pool-…` → 数据中心；`fiberhost-1.example.net` → 无信号；`mx.dynect.net` → 无信号；`proxy-7.pool…` / `node-12.dsl…` / `mail.cable…` / `host-1-2-3-4.dsl…` → 无信号。
+正例（测试覆盖，格式按实际 DoH 反查结果）：BT `host86-128-12-34.range86-128.btcentralplus.com`、VOO `host-1-2-3-4.voo.be`、Telmex `dsl-2-1-150-189-dynamic.prod-infinitum.com.mx`、Init7 `…fiber7.init7.net`、Sunrise `…dclient.hispeed.ch` / `adsl-….adslplus.ch`、Comcast `c-73-….hsd1.fl.comcast.net` → 家宽；ASN 不在库内时按家宽（低）估算。Telmex 另一种写法 `acceso-187.140.1.2.prod-infinitum.com.mx` 没有家宽词，结果为无信号（不会因 `.mx` 被屏蔽）。
+
+反例（测试覆盖）：`webhost-1.example.net` / `1-2-3-4.webhost.example.net` / `fiberhost-1.example.net` → 无信号（`host`）；`cloudprovider-1.example.com` → 数据中心（`cloud`）；`vpn-pool-1.example.net` / `1-2-3-4.vpnpool.example` → 无信号（`vpn`）；`gke-prod-default-pool-…` → 数据中心；`mx.dynect.net`、`mx1.dsl.example.com.mx` → 无信号（`mx`）；`proxy-7.pool…` / `node-12.dsl…` / `mail.cable…` / `host.dsl…` → 无信号。
 
 **外部数据说是机房时不按家宽估算**：配置了 `IPAPI_IS_KEY` 后，如果 ipapi.is 标记该 IP 为数据中心（`is_datacenter`），而 PTR 看起来像家宽，则以外部数据为准：ASN 不在内置库 → 类型判为数据中心、PTR 不加分，人数显示「服务器 IP」（不显示 1–5 人）；ASN 在库内且为家宽运营商 → 类型为商业宽带（低），人数显示「无法估算（外部数据标记为机房）」。移动网络不受此规则影响。外部请求失败（`ok=false`）时忽略。
 
@@ -106,8 +109,8 @@ PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）按**词**匹配，不做子�
 
 - **存什么**：只存三列：`ip_hash`、`fp_hash`、`day`（UTC 日期）。`ip_hash = HMAC-SHA256(IP_HASH_SALT, "v4:<IP>")`（IPv6 按 /64 前缀：`"v6/64:<前缀>"`），`fp_hash = HMAC-SHA256(IP_HASH_SALT, "fp:<指纹哈希>")`，各截取 128 位。不存原始 IP、指纹明细、UA、时间戳或 Cookie。指纹哈希本身由浏览器本地计算（UA、屏幕、时区、语言、Canvas、WebGL、字体等拼接后取 64 位哈希）。
 - **去重**：主键 `(ip_hash, fp_hash, day)`，同一设备同一天重复访问只算一行。
-- **每日上限**：同一 `ip_hash`（IPv4 单个地址 / IPv6 同一 /64）每天最多新记录 `SEEN_DAILY_CAP` 个指纹（默认 30），防止脚本伪造指纹刷高设备数、刷写入额度。先读当天行数，满额直接返回、不写；写入语句本身带条件（`INSERT … SELECT … WHERE 当天行数 < 上限`），并发请求也不会超额；满额后本 isolate 记住该 IP 当天已满，之后只做一次主键点查（判断这个浏览器是否早已计入），**不再写 D1**。响应带 `capped` / `alreadyCounted`，`observed.dailyCap` / `observed.cappedToday`，页面会注明「今天这个 IP 上新出现的浏览器已达上限」。
-- **全站每日上限**：全站当天新写入的 `ip_seen` 行数达到 `SEEN_GLOBAL_DAILY_CAP`（默认 15000）后，**当天暂停统计**，UTC 0 点（北京时间 8 点）自动恢复。计数放在 `seen_daily(day, n)` 计数器表（迁移 `0002_seen_daily.sql`；只有日期和数字，不含 IP / 指纹），每成功写入一行 +1；检查时与单 IP 计数在同一条查询里按主键读 1 行，不做 `COUNT(*)` 全天扫描；写入语句也带「计数器 < 上限」条件，并发不会超额；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。暂停时 `POST /api/seen` 仍返回 200：`{ ok: true, recorded: false, paused: true, pausedReason: "global_cap", message: "本站统计今日已暂停…IP 检测不受影响" }`，`observed.pausedToday = true`；页面在「本站观测」处注明，**IP 检测、评分、人数类型估算完全不受影响**。`/api/health` 的 `seen.globalDailyCap` / `seen.pausedToday` 可查看当前设置。
+- **每日上限**：同一 `ip_hash`（IPv4 单个地址 / IPv6 同一 /64）每天最多新记录 `SEEN_DAILY_CAP` 个指纹（默认 30），防止脚本伪造指纹刷高设备数、刷写入额度。先读当天行数，满额直接返回、不写；写入语句本身带条件（`INSERT … SELECT … WHERE 当天行数 < 上限`）；D1 按语句串行执行，条件判断和插入在同一条语句里完成，并发请求不会超过上限（见下条的并发测试）；满额后本 isolate 记住该 IP 当天已满，之后只做一次主键点查（判断这个浏览器是否早已计入），**不再写 D1**。响应带 `capped` / `alreadyCounted`，`observed.dailyCap` / `observed.cappedToday`，页面会注明「今天这个 IP 上新出现的浏览器已达上限」。
+- **全站每日上限**：全站当天新写入的 `ip_seen` 行数达到 `SEEN_GLOBAL_DAILY_CAP`（默认 15000）后，**当天暂停统计**，UTC 0 点（北京时间 8 点）自动恢复。计数放在 `seen_daily(day, n)` 计数器表（迁移 `0002_seen_daily.sql`；只有日期和数字，不含 IP / 指纹），每成功写入一行 +1；检查时与单 IP 计数在同一条查询里按主键读 1 行，不做 `COUNT(*)` 全天扫描；写入时把「带条件的插入（单 IP 行数 < 单 IP 上限 且 计数器 < 全站上限）」和「计数器 +1（仅当上一条确实插入了一行，`WHERE changes() > 0`）」放进**同一个 `env.DB.batch`**——D1 的 batch 是一个事务、按顺序执行，两条语句之间不会插进别的请求的写入，因此计数器始终等于当天实际写入行数，并发也不会超额。并发验证：`npm run stress:seen`（`scripts/stress-seen-d1.mjs`，通过 wrangler 的 `getPlatformProxy` 用本地 D1（Miniflare）对 1000 个不同 IP 同时调用 `recordSeen`，全站上限 50）→ 实际写入 50 行、计数器 50；改成 batch 之前同一测试写入 1000 行。`npm test` 里另有一个模拟延迟的同类测试。注意这是本地 D1 的结果，没有在线上 Cloudflare 环境实测；`ip_seen` 的单 IP 上限同理（同一条件插入语句）；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。暂停时 `POST /api/seen` 仍返回 200：`{ ok: true, recorded: false, paused: true, pausedReason: "global_cap", message: "本站统计今日已暂停…IP 检测不受影响" }`，`observed.pausedToday = true`；页面在「本站观测」处注明，**IP 检测、评分、人数类型估算完全不受影响**。`/api/health` 的 `seen.globalDailyCap` / `seen.pausedToday` 可查看当前设置。
   - **为什么默认 15000 而不是 5 万**：D1 免费额度是每天 10 万「写入行」，并且**索引行、DELETE 都计入**（[D1 定价](https://developers.cloudflare.com/d1/platform/pricing/)）。每新增 1 行 ≈ 表 1 + `day` 索引 1 + 计数器 1 = 3 行写入，30 天后清理删除 ≈ 再 2 行；15000 × 3 + 15000 × 2 ≈ 7.5 万行 / 天（最坏情况），留出余量。付费计划可以调高。
   - 没有做按 /48 的单独上限：单 IP（IPv6 按 /64）上限 + 严格限流 + 全站上限已能兜住写入额度，再加一个 /48 计数器每次写入还要多写 1 行。
 - **保留**：只保留最近 30 天。每天 cron（`17 19 * * *` UTC）清理，另外每个 isolate 每小时在上报时顺带清理一次。
@@ -153,6 +156,7 @@ scripts/test-ranges.mjs  IP 段匹配测试（与原始 CIDR 暴力比对）
 scripts/test-rules.mjs   ASN / PTR / 评分规则测试
 scripts/test-sharing.mjs 共用人数估算规则测试
 scripts/test-seen.mjs    D1 观测计数测试（node:sqlite 模拟 D1，执行真实迁移）
+scripts/stress-seen-d1.mjs 本地 D1 并发压测（1000 并发 / 全站上限 50，检查写入行数不超上限）
 scripts/stamp-assets.mjs 给 index.html 中的静态资源加 ?v=<内容哈希>
 migrations/              D1 表结构
 scripts/bench-ranges.mjs 冷启动 CPU 时间测量

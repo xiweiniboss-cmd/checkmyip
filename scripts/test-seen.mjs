@@ -9,7 +9,9 @@ import { limiterKey } from '../src/lib/ratelimit.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
 
-function fakeD1() {
+// latency=true：每次调用先让出事件循环（模拟网络往返），让并发请求的语句真正交错执行
+const tick = () => new Promise((r) => setImmediate(r));
+function fakeD1({ latency = false } = {}) {
   const db = new DatabaseSync(':memory:');
   const dir = new URL('../migrations/', import.meta.url);
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
@@ -22,10 +24,18 @@ function fakeD1() {
       let args = [];
       const api = {
         bind(...a) { args = a; return api; },
-        async run() { const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; },
-        async first() { return st.get(...args) ?? null; },
+        async run() { if (latency) await tick(); const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; },
+        async first() { if (latency) await tick(); return st.get(...args) ?? null; },
       };
+      api._exec = () => { const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; };
       return api;
+    },
+    // 与 D1 一样：batch 内的语句在一个事务里按顺序执行
+    async batch(list) {
+      if (latency) await tick();
+      stats.batches = (stats.batches || 0) + 1;
+      db.exec('BEGIN');
+      try { const out = list.map((x) => x._exec()); db.exec('COMMIT'); return out; } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
   };
 }
@@ -150,6 +160,17 @@ _resetCappedMemo();
 const gEnv2 = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '3' };
 const gPar = await Promise.all(Array.from({ length: 8 }, (_, i) => recordSeen(gEnv2, parseIP(`198.18.0.${i + 1}`), fpN(5000 + i), now)));
 eq('并发 8 个不同 IP、全站上限 3：只写入 3 行，其余 paused', [gPar.filter((r) => r.inserted).length, gPar.filter((r) => r.paused).length, gEnv2.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c], [3, 5, 3]);
+// v0.3.3：写入与计数器 +1 在同一 batch（事务）里：1000 个并发、全站上限 50 → 恰好 50 行，计数器 = 行数
+_resetCappedMemo();
+{
+  const gEnv3 = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '50' };
+  const ipN = (i) => parseIP(`11.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+  const res = await Promise.all(Array.from({ length: 1000 }, (_, i) => recordSeen(gEnv3, ipN(i), fpN(70000 + i), now)));
+  const rows = gEnv3.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c;
+  const ctr = gEnv3.DB.raw.prepare('SELECT n FROM seen_daily WHERE day = ?').get(dayStr(now)).n;
+  eq('并发 1000、全站上限 50：ip_seen ≤ 50 且计数器 = 行数', [rows, ctr, res.filter((r) => r.inserted).length, res.filter((r) => r.paused).length], [50, 50, 50, 950]);
+}
+_resetCappedMemo();
 // 清理同时删除 30 天前的计数器行
 {
   const cEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef' };

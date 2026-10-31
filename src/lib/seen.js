@@ -70,7 +70,8 @@ export const globalPausedToday = (env, now = Date.now()) => globalPaused === `${
  * - 满额后记在本 isolate 的内存里，之后同 IP 当天的请求不再计数、不再写 D1，
  *   只按主键点查一次本指纹今天是否已计入（让满额前已计入的浏览器仍显示「已计入」）。
  * - 全站当天新增行数达到 seenGlobalCap 后暂停（paused）：计数器 seen_daily 与单 IP 计数在同一条查询里读出（1 次往返），
- *   写入条件同时检查全站计数器；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。
+ *   写入（条件：计数器 < 上限）与计数器 +1（条件：确实写入了）在同一个 D1 batch / 事务里，并发也不会超额；
+ *   暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。
  * 返回 { inserted, capped, dup, paused }
  */
 export async function recordSeen(env, parsed, fp, now = Date.now()) {
@@ -96,14 +97,18 @@ export async function recordSeen(env, parsed, fp, now = Date.now()) {
   if (Number(row?.mine || 0) > 0) return { inserted: false, capped: n >= cap, dup: true, paused };
   if (paused) return { inserted: false, capped: n >= cap, dup: false, paused: true };
   if (n >= cap) { remember(memoKey, cap); return { inserted: false, capped: true, dup: false, paused: false }; }
-  const r = await env.DB.prepare(
+  // 写入与计数器 +1 放在同一个 batch（D1 batch = 一个事务，按顺序执行）：
+  // ① 条件写入：单 IP 当天行数 < 上限 且 全站计数器 < 全站上限；
+  // ② 只有 ① 真的写入了一行（changes() > 0）才把计数器 +1。
+  // 两条语句之间不会插入其它请求的语句，所以并发时「计数器 = 当天实际行数 ≤ 上限」。
+  const ins = env.DB.prepare(
     'INSERT OR IGNORE INTO ip_seen (ip_hash, fp_hash, day) SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM ip_seen WHERE ip_hash = ?1 AND day = ?3) < ?4'
     + ' AND COALESCE((SELECT n FROM seen_daily WHERE day = ?3), 0) < ?5',
-  ).bind(ih, fh, day, cap, gcap).run();
+  ).bind(ih, fh, day, cap, gcap);
+  const inc = env.DB.prepare('INSERT INTO seen_daily (day, n) SELECT ?1, 1 WHERE changes() > 0 ON CONFLICT (day) DO UPDATE SET n = n + 1').bind(day);
+  const [r] = await env.DB.batch([ins, inc]);
   const inserted = (r?.meta?.changes ?? 0) > 0;
   if (inserted) {
-    // 计数器 +1（主键 upsert，1 行写入）；失败不影响本次记录
-    await env.DB.prepare('INSERT INTO seen_daily (day, n) VALUES (?1, 1) ON CONFLICT (day) DO UPDATE SET n = n + 1').bind(day).run().catch(() => {});
     if (g + 1 >= gcap) globalPaused = pausedKey;
     const capped = n + 1 >= cap;
     if (capped) remember(memoKey, cap);

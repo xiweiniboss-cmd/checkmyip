@@ -60,7 +60,9 @@ eq('未知 ASN + 家宽 PTR（IPv6）置信度降为低', [unk6.kind, unk6.confi
 const unkCn = est({ ip: '203.0.113.20', asn: 64999, org: 'Totally Unknown Org', cc: 'CN', ptr: 'ppp-203-0-113-20.example.cn' });
 eq('未知 ASN + 家宽 PTR（中国）按国内宽带', unkCn.kind, 'cn_broadband');
 // 没有 PTR 或 PTR 无关键词的未知 ASN 仍然不估算；服务器类 PTR 也不估算（与之前一致）
-eq('未知 ASN + 无关键词 PTR', est({ ip: '203.0.113.9', asn: 64999, org: 'Totally Unknown Org', cc: 'US', ptr: 'host-203-0-113-9.example.net' }).kind, 'unknown');
+eq('未知 ASN + 无关键词 PTR', est({ ip: '203.0.113.9', asn: 64999, org: 'Totally Unknown Org', cc: 'US', ptr: 'ip-203-0-113-9.example.net' }).kind, 'unknown');
+// v0.3.3：host + IP 编号（BT / VOO 写法）视为家宽写法
+eq('未知 ASN + host-<IP> PTR → 按家宽（低）', [est({ ip: '203.0.113.9', asn: 64999, org: 'Totally Unknown Org', cc: 'BE', ptr: 'host-203-0-113-9.voo.be' }).kind], ['household']);
 eq('未知 ASN + 服务器 PTR', est({ ip: '203.0.113.9', asn: 64999, org: 'Totally Unknown Org', cc: 'US', ptr: 'vps9.example.net' }).kind, 'unknown');
 // Quad9 仍是服务器
 eq('Quad9 9.9.9.9', est({ ip: '9.9.9.9', asn: 19281, org: 'QUAD9-AS-1', cc: 'CH', ptr: 'dns9.quad9.net' }).kind, 'server');

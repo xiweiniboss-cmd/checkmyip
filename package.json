@@ -1,6 +1,6 @@
 {
   "name": "checkmyip",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "checkmyip — IP 信息与纯净度检测（Cloudflare Worker + 静态资源）",
   "type": "module",
@@ -17,6 +17,7 @@
     "test:rules": "node scripts/test-rules.mjs",
     "test:sharing": "node scripts/test-sharing.mjs",
     "test:seen": "node scripts/test-seen.mjs",
+    "stress:seen": "node scripts/d1-local-config.mjs && node scripts/stress-seen-d1.mjs",
     "test:ratelimit": "node scripts/test-ratelimit.mjs",
     "bench": "node scripts/bench-ranges.mjs",
     "smoke": "node scripts/smoke-test.mjs"
