@@ -10,10 +10,10 @@ import { externalRisk } from './lib/external.js';
 import { analyze } from './lib/score.js';
 import { rateLimited, limiterHealth } from './lib/ratelimit.js';
 import { estimateSharing } from './lib/sharing.js';
-import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
+import { seenStatus, seenCap, seenGlobalCap, globalPausedToday, SEEN_PAUSED_MESSAGE, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
 import meta from './data/meta.json';
 
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 
 // ---------- 小工具 ----------
 function json(data, status = 200, extra = {}) {
@@ -223,7 +223,7 @@ async function observedFor(env, parsed) {
   if (!st.enabled) return { shown: true, enabled: false, reason: st.reason, message: st.message };
   try {
     const c = await countSeen(env, parsed);
-    return { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env) };
+    return { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env), pausedToday: globalPausedToday(env) };
   } catch (e) {
     console.warn(`[checkmyip] D1 查询失败：${e}`);
     return { shown: true, enabled: false, reason: 'db_error', message: '本站统计暂时不可用' };
@@ -251,7 +251,10 @@ async function handleSeen(request, env, ctx, url) {
     const r = await recordSeen(env, v.parsed, fp);
     maybeCleanup(env, ctx);
     const c = await countSeen(env, v.parsed);
-    return json({ ok: true, enabled: true, recorded: r.inserted, alreadyCounted: r.dup === true, capped: r.capped, observed: { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env), cappedToday: r.capped } }, 200, { 'x-ratelimit-via': rlr.via });
+    // 全站今日写入达上限：统计暂停（只影响「本站观测」，IP 检测照常）
+    const pause = r.paused ? { paused: true, pausedReason: 'global_cap', message: SEEN_PAUSED_MESSAGE } : { paused: false };
+    return json({ ok: true, enabled: true, recorded: r.inserted, alreadyCounted: r.dup === true, capped: r.capped, ...pause,
+      observed: { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env), cappedToday: r.capped, pausedToday: !!r.paused } }, 200, { 'x-ratelimit-via': rlr.via });
   } catch (e) {
     console.warn(`[checkmyip] D1 写入失败：${e}`);
     return json({ ok: false, enabled: false, error: 'db_error', message: '本站统计暂时不可用' }, 503);
@@ -263,7 +266,7 @@ function health(env) {
   const seen = seenStatus(env);
   if (!seen.enabled) warnings.push(seen.message);
   return { ok: true, version: VERSION, time: new Date().toISOString(), rateLimit, rateLimitKey: keying,
-    seen: { enabled: seen.enabled, reason: seen.reason || null, dailyNewDeviceCap: seenCap(env) }, warnings };
+    seen: { enabled: seen.enabled, reason: seen.reason || null, dailyNewDeviceCap: seenCap(env), globalDailyCap: seenGlobalCap(env), pausedToday: seen.enabled ? globalPausedToday(env) : false }, warnings };
 }
 
 // v4.<域名> / v6.<域名>：只返回访问者 IP 的极简探测接口（这两个子域分别只配 A / AAAA 记录）

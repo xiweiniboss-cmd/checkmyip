@@ -56,7 +56,9 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     default:
       // 未知 ASN：小扣分（见 UNKNOWN_ASN_PENALTY），类型置信度「低」；有家宽类 PTR 时按家宽（低置信度）判断
       if (asn.asn) {
-        const ptrHint = ptr.signal === 'residential' ? `反向解析含宽带用户类关键词「${ptr.keyword}」，按家庭宽带（低置信度）判断。` : '';
+        const extDcHint = external.some((x) => x.ok && x.datacenter);
+        const ptrHint = ptr.signal === 'residential'
+          ? (extDcHint ? `反向解析含宽带用户类关键词「${ptr.keyword}」，但外部数据标记为数据中心，以外部数据为准。` : `反向解析含宽带用户类关键词「${ptr.keyword}」，按家庭宽带（低置信度）判断。`) : '';
         add('asn', 'ASN 类型', UNKNOWN_ASN_PENALTY, 'warn', `AS${asn.asn}（${asn.org || '未知组织'}）不在内置库中，组织名也无法判断类型。${ptrHint}${UNKNOWN_ASN_NOTE}`);
         labels.add('未知网络');
       }
@@ -73,6 +75,7 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
   if (ptr.ptr) {
     if (ptr.signal === 'datacenter') add('ptr', '反向解析 (PTR)', -10, 'bad', `PTR 为 ${ptr.ptr}，包含服务器类关键词「${ptr.keyword}」。`);
     else if (ptr.signal === 'static') add('ptr', '反向解析 (PTR)', -5, 'warn', `PTR 为 ${ptr.ptr}，包含「${ptr.keyword}」，通常是静态 / 商业线路。`);
+    else if (ptr.signal === 'residential' && external.some((x) => x.ok && x.datacenter)) add('ptr', '反向解析 (PTR)', 0, 'warn', `PTR 为 ${ptr.ptr}，包含宽带用户类关键词「${ptr.keyword}」，但外部数据标记为数据中心，不加分。`);
     else if (ptr.signal === 'residential') add('ptr', '反向解析 (PTR)', 5, 'good', `PTR 为 ${ptr.ptr}，包含宽带用户类关键词「${ptr.keyword}」。`);
     else add('ptr', '反向解析 (PTR)', 0, 'info', `PTR 为 ${ptr.ptr}，未包含可判断类型的关键词。`);
   } else {

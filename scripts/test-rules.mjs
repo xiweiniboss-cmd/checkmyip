@@ -17,7 +17,7 @@ for (const [p, exp] of Object.entries(ptr)) eq(`PTR ${p}`, classifyPtr(p).signal
 
 const run = (asn, org, extra = {}) => {
   const asnInfo = classifyAsn(asn, org);
-  return analyze({ cloud: [], asn: { asn, org }, asnInfo, ptr: extra.ptr || {}, tor: { tor: false, source: 'bundled', count: 1 }, external: [], quality: extra.quality || { geoOk: true, ptrOk: true } });
+  return analyze({ cloud: [], asn: { asn, org }, asnInfo, ptr: extra.ptr || {}, tor: { tor: false, source: 'bundled', count: 1 }, external: extra.external || [], quality: extra.quality || { geoOk: true, ptrOk: true } });
 };
 // 第 8 项：中国移动 → 家宽，置信度中
 for (const a of [9808, 56048, 24400]) { const r = run(a, 'China Mobile'); eq(`AS${a} 类型`, [r.type, r.confidenceText], ['residential', '中']); }
@@ -74,6 +74,32 @@ eq('关键词推测：置信度低、提示、扣 5 分', [classifyAsn(64998, 'E
 const kwHost = run(64997, 'Example Hosting Ltd');
 eq('关键词推测机房：置信度低', [kwHost.type, kwHost.confidenceText], ['datacenter', '低']);
 eq('内置 ASN 不受影响', [run(7922, 'Comcast').confidenceText, run(7922, 'Comcast').score], ['高', 100]);
+
+// v0.3.2：家宽关键词按整词 / 可完整拆分的复合词匹配；服务 / 平台类词不判家宽
+const negPtrs = { 'vpn-pool-1.example.net': null, 'vpn-pool-1-2-3-4.example.com': null, 'gke-prod-default-pool-1a2b3c.example.net': 'datacenter',
+  'fiberhost-1.example.net': null, 'mx.dynect.net': null, 'mx1.dsl.example.net': null, 'proxy-7.pool.example.com': null,
+  'node-12.dsl.example.net': null, 'mail.cable.example.org': null, 'smtp-out.customer.example.net': null, 'host-1-2-3-4.dsl.example.net': null,
+  'k8s-worker-pool-3.example.io': 'datacenter', 'aks-nodepool1-123.example.net': 'datacenter', 'cluster-1.pool.example.net': 'datacenter',
+  'my-cloud-pool.example': 'datacenter', 'fiberhosting.example.net': 'datacenter', 'serverpool.example.net': 'datacenter',
+  'dynect.net': null, 'liverpool.example': null, 'clienthost.example': null, 'dslforum.example.org': null, 'poolside.example': null,
+  'cdn-edge-1.pool.example': null, 'tor-exit.dsl.example': null };
+for (const [p, exp] of Object.entries(negPtrs)) {
+  const c = classifyPtr(p);
+  eq(`家宽误判反例 ${p}`, c.signal, exp);
+  const r = run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...c } });
+  eq(`家宽误判反例 ${p} 不得 95 / 家宽`, [r.type === 'residential', r.score >= 95], [false, false]);
+}
+const posPtrs = { 'c-73-0-0-1.hsd1.il.comcast.net': 'hsd', '85-195-230-77.fiber7.init7.net': 'fiber', 'adsl-84-226-12-34.adslplus.ch': 'adsl',
+  '77-57-100-20.dclient.hispeed.ch': 'client（dclient）', 'cablemodem-1.example.org': 'cable（cablemodem）', '1-2-3-4.customers.example.ph': 'customers',
+  'ip-1-2-3-4.hsi03.unitymediagroup.de': 'hsi', 'pppoe-1-2-3-4.example.de': 'pppoe', 'xdsl-1-2.example.it': 'xdsl', 'dynamicip-1.example.net': 'dynamic（dynamicip）' };
+for (const [p, kw] of Object.entries(posPtrs)) eq(`家宽正例 ${p}`, [classifyPtr(p).signal, classifyPtr(p).keyword], ['residential', kw]);
+// 外部数据（ipapi.is）标记机房 + 家宽 PTR：类型为数据中心，PTR 不加分
+{
+  const p = '85-195-230-77.fiber7.init7.net';
+  const r = run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...classifyPtr(p) }, external: [{ ok: true, source: 'ipapi.is', datacenter: true }] });
+  const ps = r.signals.find((x) => x.key === 'ptr');
+  eq('ipapi.is 机房 + 家宽 PTR：数据中心、PTR 不加分', [r.type, r.score < 95, ps.effect], ['datacenter', true, 0]);
+}
 
 console.log(`${fails ? '✘' : '✔'} 规则测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

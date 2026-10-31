@@ -403,7 +403,8 @@
         const included = !!(j.recorded || j.alreadyCounted);
         const cap = j.observed.dailyCap || 30;
         const capNote = j.capped ? (included ? `今天这个 IP 上新出现的浏览器已达上限（每天最多计 ${cap} 个），之后的新浏览器今天不再计入。` : `今天这个 IP 上新出现的浏览器已达上限（每天最多计 ${cap} 个），本次访问未计入。`) : '';
-        state.self.sharing.observed = { ...j.observed, includesYou: included, notCounted: capNote };
+        const pauseNote = j.paused ? (included ? '本站统计今日已暂停（全站今日新增记录已达上限），明天自动恢复；IP 检测不受影响。' : '本站统计今日已暂停（全站今日新增记录已达上限），本次访问未计入，明天自动恢复；IP 检测不受影响。') : '';
+        state.self.sharing.observed = { ...j.observed, includesYou: included, notCounted: pauseNote || capNote };
       }
       else if (r.status === 429 && state.self.sharing.observed) state.self.sharing.observed = { ...state.self.sharing.observed, notCounted: '本次访问未计入（上报过于频繁，稍后刷新即可）。' };
       else if (j.enabled === false) state.self.sharing.observed = { shown: true, enabled: false, reason: j.reason, message: j.message };

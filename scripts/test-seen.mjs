@@ -4,7 +4,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseIP } from '../src/lib/ip.js';
-import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, validFp, dayStr, ipKey, SEEN_DAILY_CAP_DEFAULT, _resetCappedMemo } from '../src/lib/seen.js';
+import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, validFp, dayStr, ipKey, SEEN_DAILY_CAP_DEFAULT, _resetCappedMemo, seenGlobalCap, SEEN_GLOBAL_DAILY_CAP_DEFAULT, globalPausedToday } from '../src/lib/seen.js';
 import { limiterKey } from '../src/lib/ratelimit.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
@@ -118,6 +118,48 @@ for (let i = 0; i < 20; i++) { const r = await recordSeen(capEnv3, parseIP(`2001
 eq('IPv6 换地址（同一 /64）也共享上限', v6ins, 5);
 // 计数与限流用的是同一个键
 eq('ipKey 与限流键一致', [ipKey(parseIP('2001:db8:aa:bb::1')).key, limiterKey('2001:db8:aa:bb:ffff::9')], ['v6/64:20010db800aa00bb', 'v6/64:20010db800aa00bb']);
+
+// v0.3.2：全站每日新增行上限（SEEN_GLOBAL_DAILY_CAP）
+eq('全站上限默认 15000 / 可配置 / 非法值回落默认', [SEEN_GLOBAL_DAILY_CAP_DEFAULT, seenGlobalCap({}), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '50000' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: 'x' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '0' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '1e9' })], [15000, 15000, 50000, 15000, 15000, 10000000]);
+_resetCappedMemo();
+const gEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '5' };
+const gIps = Array.from({ length: 12 }, (_, i) => parseIP(`192.0.2.${i + 1}`));
+const gRes = [];
+for (let i = 0; i < 5; i++) gRes.push(await recordSeen(gEnv, gIps[i], fpN(3000 + i), now));
+eq('全站上限 5：前 5 个不同 IP 都写入，第 5 个之后本 isolate 记为暂停', [gRes.every((r) => r.inserted && !r.paused), globalPausedToday(gEnv, now)], [true, true]);
+eq('计数器 seen_daily 当天 = 5', gEnv.DB.raw.prepare('SELECT n FROM seen_daily WHERE day = ?').get(dayStr(now)).n, 5);
+const gSt = { ...gEnv.DB.stats };
+const gOver = [];
+for (let i = 5; i < 12; i++) gOver.push(await recordSeen(gEnv, gIps[i], fpN(3000 + i), now));
+eq('达到全站上限后：paused=true、不写入、0 次写、每请求只 1 次主键点查', [gOver.every((r) => r.paused && !r.inserted && !r.capped), gEnv.DB.stats.writes - gSt.writes, gEnv.DB.stats.prepares - gSt.prepares], [true, 0, gOver.length]);
+eq('ip_seen 当天只有 5 行', gEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen WHERE day = ?').get(dayStr(now)).c, 5);
+{
+  const again = await recordSeen(gEnv, gIps[0], fpN(3000), now);
+  eq('暂停后，早已计入的浏览器仍判为已计入', [again.inserted, again.paused, again.dup], [false, true, true]);
+}
+// 新 isolate（内存为空）：读一次（含计数器）即知暂停，不写
+_resetCappedMemo();
+const gSt2 = { ...gEnv.DB.stats };
+const gNew = await recordSeen(gEnv, gIps[11], fpN(3999), now);
+eq('新 isolate：1 次读取即判定暂停、不写', [gNew.paused, gNew.inserted, gEnv.DB.stats.writes - gSt2.writes, gEnv.DB.stats.prepares - gSt2.prepares], [true, false, 0, 1]);
+eq('暂停不影响读取计数（countSeen 照常）', (await countSeen(gEnv, gIps[0], now)).devices30d, 1);
+// 次日自动恢复
+eq('次日自动恢复写入', [(await recordSeen(gEnv, gIps[11], fpN(4000), now + day)).inserted, globalPausedToday(gEnv, now + day)], [true, false]);
+// 并发：即使同时通过预读，条件写入也不超过全站上限
+_resetCappedMemo();
+const gEnv2 = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '3' };
+const gPar = await Promise.all(Array.from({ length: 8 }, (_, i) => recordSeen(gEnv2, parseIP(`198.18.0.${i + 1}`), fpN(5000 + i), now)));
+eq('并发 8 个不同 IP、全站上限 3：只写入 3 行，其余 paused', [gPar.filter((r) => r.inserted).length, gPar.filter((r) => r.paused).length, gEnv2.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c], [3, 5, 3]);
+// 清理同时删除 30 天前的计数器行
+{
+  const cEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef' };
+  await recordSeen(cEnv, gIps[0], fpN(1), now - 40 * day);
+  _resetCappedMemo();
+  await recordSeen(cEnv, gIps[0], fpN(2), now);
+  await cleanupSeen(cEnv, now);
+  eq('清理同时删除过期 seen_daily 行', cEnv.DB.raw.prepare('SELECT day FROM seen_daily ORDER BY day').all().map((x) => x.day), [dayStr(now)]);
+}
+_resetCappedMemo();
 
 console.log(`${fails ? '✘' : '✔'} D1 计数测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

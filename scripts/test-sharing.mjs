@@ -73,5 +73,18 @@ eq('PTR 倒序', ptrEmbedsIp('1.1.222.114.broad.nj.js.dynamic.163data.com.cn', '
 eq('PTR 不含编号', ptrEmbedsIp('cpe.example.net', '73.0.0.1'), false);
 eq('PTR 其他 IP', ptrEmbedsIp('c-73-0-0-2.hsd1.fl.comcast.net', '73.0.0.1'), false);
 
+// v0.3.2：外部数据（ipapi.is）说是机房时，不按家宽估算人数
+const ipapiDc = [{ ok: true, source: 'ipapi.is', datacenter: true, vpn: false, proxy: false, tor: false }];
+const xDc = est({ ip: '85.195.230.77', asn: 13030, org: 'Init7 (Switzerland) Ltd.', cc: 'CH', ptr: '85-195-230-77.fiber7.init7.net', external: ipapiDc });
+eq('未知 ASN + 家宽 PTR + ipapi.is 机房 → 服务器，不是 1–5 人', [xDc.kind, xDc.headline, xDc.reasons[0].includes('ipapi.is') && xDc.reasons[0].includes('矛盾')], ['server', '未知', true]);
+const xDc0 = est({ ip: '85.195.230.77', asn: 13030, org: 'Init7 (Switzerland) Ltd.', cc: 'CH', ptr: '85-195-230-77.fiber7.init7.net', external: [{ ok: true, source: 'ipapi.is', datacenter: false }] });
+eq('同上但 ipapi.is 未标记机房 → 仍为单户家庭', [xDc0.kind, xDc0.headline], ['household', '约 1–5 人']);
+const xDcIsp = est({ ip: '73.0.0.1', asn: 7922, org: 'Comcast Cable Communications', cc: 'US', ptr: 'c-73-0-0-1.hsd1.fl.comcast.net', external: ipapiDc });
+eq('已知家宽 ASN + ipapi.is 机房 → 无法估算（信号矛盾）', [xDcIsp.kind, xDcIsp.headline, xDcIsp.scene], ['unknown', '无法估算', '外部数据标记为机房']);
+const xDcFail = est({ ip: '73.0.0.1', asn: 7922, org: 'Comcast Cable Communications', cc: 'US', ptr: 'c-73-0-0-1.hsd1.fl.comcast.net', external: [{ ok: false, source: 'ipapi.is', datacenter: true }] });
+eq('ipapi.is 请求失败（ok=false）不影响', xDcFail.kind, 'household');
+const xDcMob = est({ ip: '117.136.0.1', asn: 9808, org: 'China Mobile', cc: 'CN', external: ipapiDc });
+eq('移动网络不受外部机房标记影响（仍为运营商级 NAT）', xDcMob.kind, 'cgnat_mobile');
+
 console.log(`${fails ? '✘' : '✔'} 人数估算测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

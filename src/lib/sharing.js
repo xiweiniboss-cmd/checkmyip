@@ -28,6 +28,8 @@ function out(kind, headline, scene, min, max, confidence, reasons) {
 export function estimateSharing({ ip, version, countryCode, asnInfo = {}, ptr = {}, cloud = [], tor = {}, external = [], analysis = {} }) {
   const ext = external.filter((x) => x.ok);
   const extProxy = ext.some((x) => x.vpn || x.proxy || x.tor);
+  // 外部数据（ipapi.is 等）标记为数据中心 / 托管
+  const extDc = ext.filter((x) => x.datacenter).map((x) => x.source || '外部数据');
   const name = asnInfo.name || '';
 
   if (tor.tor) return out('public_proxy', '可能数百人', '公共出口 / Tor', 100, null, 'medium',
@@ -37,6 +39,10 @@ export function estimateSharing({ ip, version, countryCode, asnInfo = {}, ptr = 
   if (cloud.length || asnInfo.cls === 'hosting') return out('server', '未知', '服务器 IP，若用作代理出口则可能多人', 1, null, 'low',
     ['这是云服务器 / 机房 IP：如果只是网站或服务，背后可能没有“人”；如果被用作 VPN / 代理出口，则可能多人共用，外部无法区分。']);
   // ASN 未收录、但 PTR 明显是家宽（ppp- / dsl / dyn / pool / ftth / customer …）：按家宽估算，置信度一律「低」
+  // 外部数据说是机房时不采信 PTR：按服务器 IP 处理（与评分里的类型「数据中心」一致）
+  if (!asnInfo.cls && extDc.length && !analysis.incomplete) return out('server', '未知', '服务器 IP，若用作代理出口则可能多人', 1, null, 'low',
+    [`外部数据（${[...new Set(extDc)].join('、')}）把该 IP 标记为数据中心 / 托管${ptr.signal === 'residential' ? `，与反向解析 ${ptr.ptr} 的宽带写法矛盾，以外部数据为准，不按家宽估算` : ''}。`,
+      '如果只是网站或服务，背后可能没有“人”；如果被用作 VPN / 代理出口，则可能多人共用，外部无法区分。']);
   const ptrResidential = !asnInfo.cls && ptr.signal === 'residential';
   if (analysis.incomplete || (!asnInfo.cls && !ptrResidential)) return out('unknown', '无法估算', analysis.incomplete ? '数据不完整' : '网络类型未知', null, null, 'low',
     [analysis.incomplete ? '没有拿到 ASN，无法判断网络类型，因此不做估算。' : '该 ASN 不在内置库中，名称也无法判断类型，因此不做估算。']);
@@ -56,6 +62,10 @@ export function estimateSharing({ ip, version, countryCode, asnInfo = {}, ptr = 
     return { ...r, confidence: 'low', confidenceText: CONF_TEXT.low,
       reasons: [`该 ASN 不在内置库中，但反向解析 ${ptr.ptr} 含宽带用户类关键词「${ptr.keyword || ''}」，按家庭宽带估算。`, ...r.reasons] };
   }
+
+  // 宽带运营商 ASN 但外部数据标记为机房：评分里的类型降为「商业 / 机构（低置信度）」，这里不给家宽人数
+  if (asnInfo.cls === 'isp' && extDc.length) return out('unknown', '无法估算', '外部数据标记为机房', null, null, 'low',
+    [`该 IP 属于宽带运营商（${name || '未知'}），但外部数据（${[...new Set(extDc)].join('、')}）把它标记为数据中心 / 托管，可能是运营商的托管 / 商业线路，信号矛盾，因此不按家宽估算。`]);
 
   if (asnInfo.cls === 'isp') {
     const embeds = ptrEmbedsIp(ptr.ptr, ip);

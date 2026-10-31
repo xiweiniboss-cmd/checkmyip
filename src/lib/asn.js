@@ -133,42 +133,67 @@ export function classifyAsn(asn, org) {
   return { cls: null, name: org || null, by: null };
 }
 
-// PTR 反向解析关键词。全部按「词」匹配：PTR 先按 . - _ 与数字切成词，再整词比较，
-// 避免 host-1-2-3-4.isp.net、ghost、localhost 之类误判；只有少数厂商域名按子串匹配。
-const PTR_RES = ['dynamic', 'dyn', 'pool', 'dsl', 'adsl', 'vdsl', 'xdsl', 'ppp', 'pppoe', 'dhcp', 'cable', 'fiber', 'fibre',
-  'ftth', 'home', 'broadband', 'bb', 'cust', 'customer', 'residential', 'user', 'client', 'res', 'cpe', 'wlan', 'mobile',
-  'hsd', 'broad', 'catv'];
+// PTR 反向解析关键词。全部按「词」匹配：PTR 按 . - _ 与数字切成词（fiber7 → fiber、hsd1 → hsd），再整词比较，
+// 避免 host-1-2-3-4.isp.net、ghost、localhost、fiberhost、liverpool、dynect 之类误判；只有少数厂商域名按子串匹配。
+const PTR_RES = new Set(['dynamic', 'dyn', 'dynip', 'pool', 'dsl', 'adsl', 'vdsl', 'xdsl', 'sdsl', 'ppp', 'pppoe', 'dhcp', 'cable',
+  'kabel', 'fiber', 'fibre', 'ftth', 'fttx', 'fttp', 'fttb', 'fttc', 'home', 'broadband', 'broad', 'bb', 'cust', 'customer',
+  'customers', 'residential', 'res', 'user', 'users', 'client', 'clients', 'subscriber', 'cpe', 'wlan', 'mobile',
+  'hsd', 'hsi', 'catv', 'dialup', 'dial']);
+// 复合词（dclient、adslplus、cablemodem、customers、dynip …）：整个词能拆成「家宽词 + 家宽词 / 下列词缀」才算，
+// 拆出任何别的片段都不算（fiberhost = fiber + host ✗，liverpool = liver + pool ✗，dynect = dyn + ect ✗）。
+const PTR_RES_AFFIX = new Set(['d', 's', 'x', 'plus', 'ip', 'ips', 'modem', 'net', 'line']);
 const PTR_STATIC = ['static', 'fixed', 'business', 'biz'];
-// 通用服务器类词（整词）
-const PTR_DC = ['vps', 'vds', 'server', 'servers', 'dedicated', 'colo', 'colocation', 'cloud', 'compute', 'ec2', 'hosting', 'datacenter'];
+// 服务器 / 平台类词（整词，按「字母数字」切词以识别 k8s 等）→ 判为机房
+const PTR_DC = new Set(['vps', 'vds', 'server', 'servers', 'srv', 'dedicated', 'colo', 'colocation', 'cloud', 'compute', 'ec2',
+  'hosting', 'hosted', 'datacenter', 'gke', 'aks', 'eks', 'k8s', 'kube', 'kubernetes', 'cluster', 'baremetal']);
 // 厂商域名（子串）：这些名字足够独特，不会出现在家宽 PTR 中
 const PTR_DC_DOMAINS = ['googleusercontent', 'amazonaws', 'linode', 'vultr', 'hetzner', 'your-server.de', 'ovh.net',
   'contabo', 'digitalocean', 'leaseweb', 'choopa', 'akamaitechnologies'];
+// 服务器类词的复合写法（myvpsserver、webhosting …）按片段匹配：这些片段足够独特
+const PTR_DC_SUB = ['hosting', 'server', 'vps', 'datacenter', 'dedicated', 'colocation', 'kubernetes'];
+// 服务 / 基础设施类词（整词）：出现即不按家宽判断，但本身不足以判为机房（很多运营商用 host-1-2-3-4 做家宽反解）
+const PTR_NOT_RES = new Set(['vpn', 'proxy', 'proxies', 'node', 'nodes', 'mail', 'mx', 'smtp', 'imap', 'pop', 'mta', 'host', 'hosts',
+  'ns', 'dns', 'www', 'web', 'relay', 'tor', 'exit', 'cdn', 'edge', 'cache', 'lb', 'api', 'gw', 'gateway', 'router', 'core',
+  'backbone', 'ix', 'peer', 'nat', 'cgnat', 'vm', 'container', 'worker', 'bot', 'crawl', 'crawler', 'scan', 'scanner']);
 
-// 复合写法：dclient、fiber7、cablemodem、dynip、customers、adslplus、pppoe-… 也算家宽。
-// 包含这些片段即可（片段足够独特）：
-const PTR_RES_SUB = ['dsl', 'ppp', 'dhcp', 'ftth', 'fttx', 'fttp', 'fttb', 'fttc', 'broadband', 'client', 'fiber', 'fibre', 'dynamic', 'dialup'];
-// 只看词首（避免 liverpool / blackpool、kabelsalat 之类出现在词中间时误判）：
-const PTR_RES_PREFIX = ['dyn', 'cust', 'cable', 'kabel', 'pool', 'dial', 'hsd'];
-// 服务器类词的复合写法（myvpsserver、webhosting …）也按片段匹配
-const PTR_DC_SUB = ['hosting', 'server', 'vps', 'datacenter', 'dedicated', 'colocation'];
+/** 词能否拆成 ≤3 段，且每段都是家宽词或词缀、至少一段是家宽词 */
+function resCompound(t) {
+  if (PTR_RES.has(t)) return t;
+  const go = (rest, depth, hasRes, first) => {
+    if (!rest) return hasRes ? first : null;
+    if (depth === 3) return null;
+    for (let i = rest.length; i >= 1; i--) {
+      const piece = rest.slice(0, i);
+      const isRes = PTR_RES.has(piece);
+      if (!isRes && !PTR_RES_AFFIX.has(piece)) continue;
+      const r = go(rest.slice(i), depth + 1, hasRes || isRes, first || (isRes ? piece : null));
+      if (r) return r;
+    }
+    return null;
+  };
+  return go(t, 0, false, null);
+}
 
 /**
  * PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword }
- * 优先级：服务器类 > 静态 / 商业 > 家宽，任何服务器类词都会压过家宽词。
+ * 优先级：服务器类 > 服务 / 基础设施词（不判家宽） > 静态 / 商业 > 家宽。
  */
 export function classifyPtr(ptr) {
   if (!ptr) return { signal: null };
   const low = ptr.toLowerCase().replace(/\.$/, '');
   const tokens = low.split(/[^a-z]+/).filter(Boolean);
-  const dc = PTR_DC.find((k) => tokens.includes(k)) || PTR_DC_DOMAINS.find((k) => low.includes(k))
+  const alnum = low.split(/[^a-z0-9]+/).filter(Boolean);
+  const words = [...new Set([...tokens, ...alnum])];
+  const dc = words.find((t) => PTR_DC.has(t)) || PTR_DC_DOMAINS.find((k) => low.includes(k))
     || PTR_DC_SUB.find((k) => tokens.some((t) => t.includes(k)));
   if (dc) return { signal: 'datacenter', keyword: dc };
   const st = PTR_STATIC.find((k) => tokens.includes(k));
   if (st) return { signal: 'static', keyword: st };
-  const res = PTR_RES.find((k) => tokens.includes(k))
-    || PTR_RES_SUB.find((k) => tokens.some((t) => t.includes(k)))
-    || PTR_RES_PREFIX.find((k) => tokens.some((t) => t.startsWith(k)));
-  if (res) return { signal: 'residential', keyword: res };
+  const block = words.find((t) => PTR_NOT_RES.has(t));
+  if (block) return { signal: null, blockedBy: block };
+  for (const t of tokens) {
+    const k = resCompound(t);
+    if (k) return { signal: 'residential', keyword: k === t ? k : `${k}（${t}）` };
+  }
   return { signal: null };
 }

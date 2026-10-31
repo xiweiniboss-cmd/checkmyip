@@ -82,7 +82,19 @@
 | 其他家宽 | 约 1–10 人（家庭或小型网络） | 低 |
 | IPv6 家宽 | 约 1–5 人（单户家庭） | 中 |
 
-**ASN 不在内置库时看 PTR**：内置 ASN 库只收录了大运营商和云厂商，很多地区性家宽运营商（如瑞士 Init7 AS13030、Sunrise AS6730）不在库里。此时如果反向解析含宽带用户类写法——`ppp` / `adsl` / `dsl` / `cable` / `dyn…` / `pool` / `dhcp` / `broadband` / `fiber` / `fibre` / `ftth` / `cust…` / `customer` / `client` / `dialup` / `hsd` 等，且**不含** `server` / `vps` / `hosting` / `colo` / `dedicated` / `datacenter` / `cloud` 等机房词（机房词优先）——就按家庭宽带估算，置信度固定为「低」。例：`85-195-230-77.fiber7.init7.net`、`77-57-100-20.dclient.hispeed.ch`、`adsl-84-226-12-34.adslplus.ch` → 约 1–5 人；`dns9.quad9.net`（AS19281 在库内，为数据中心）不受影响。
+**ASN 不在内置库时看 PTR**：内置 ASN 库只收录了大运营商和云厂商，很多地区性家宽运营商（如瑞士 Init7 AS13030、Sunrise AS6730）不在库里。此时如果反向解析是宽带用户类写法，就按家庭宽带估算，置信度固定为「低」。例：`85-195-230-77.fiber7.init7.net`、`77-57-100-20.dclient.hispeed.ch`、`adsl-84-226-12-34.adslplus.ch` → 约 1–5 人；`dns9.quad9.net`（AS19281 在库内，为数据中心）不受影响。
+
+PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）按**词**匹配，不做子串匹配：
+
+1. 先把 PTR 按 `.` / `-` / `_` / 数字切成字母词（`fiber7` → `fiber`，`hsd1` → `hsd`）。
+2. **机房词优先** → 判为数据中心：`server` / `srv` / `vps` / `vds` / `hosting` / `hosted` / `colo` / `dedicated` / `baremetal` / `datacenter` / `cloud` / `compute` / `ec2` 以及容器平台 `gke` / `aks` / `eks` / `k8s` / `kube` / `kubernetes` / `cluster`（另有已知云域名列表）。
+3. `static` 等 → 静态（商业）。
+4. **排除词**：出现 `vpn` / `proxy` / `node` / `mail` / `mx` / `smtp` / `host` / `ns` / `dns` / `www` / `web` / `relay` / `tor` / `exit` / `cdn` / `edge` / `gw` / `gateway` / `router` / `core` / `nat` / `vm` / `worker` 等服务 / 平台类词时，**不判家宽**（也不足以判机房，结果为「无信号」）。很多运营商用 `host-1-2-3-4` 命名家宽，所以 `host` 只排除、不算机房。
+5. 家宽词必须是**整词**：`ppp` / `pppoe` / `adsl` / `dsl` / `vdsl` / `xdsl` / `cable` / `kabel` / `dyn` / `dynamic` / `dynip` / `pool` / `dhcp` / `broadband` / `fiber` / `fibre` / `ftth` / `cust` / `customer(s)` / `client(s)` / `subscriber` / `user(s)` / `cpe` / `home` / `residential` / `dialup` / `hsd` / `hsi` / `mobile` 等；或者是能**完整拆成**家宽词 + 常见后缀（`d` / `s` / `x` / `plus` / `ip` / `modem` / `net` / `line`）的复合词，如 `dclient`、`adslplus`、`cablemodem`。拆不完的不算：`fiberhost`、`liverpool`、`dyndns`、`poolside` 都**不**命中。
+
+反例（测试覆盖）：`vpn-pool-1.example.net` → 无信号；`gke-prod-default-pool-…` → 数据中心；`fiberhost-1.example.net` → 无信号；`mx.dynect.net` → 无信号；`proxy-7.pool…` / `node-12.dsl…` / `mail.cable…` / `host-1-2-3-4.dsl…` → 无信号。
+
+**外部数据说是机房时不按家宽估算**：配置了 `IPAPI_IS_KEY` 后，如果 ipapi.is 标记该 IP 为数据中心（`is_datacenter`），而 PTR 看起来像家宽，则以外部数据为准：ASN 不在内置库 → 类型判为数据中心、PTR 不加分，人数显示「服务器 IP」（不显示 1–5 人）；ASN 在库内且为家宽运营商 → 类型为商业宽带（低），人数显示「无法估算（外部数据标记为机房）」。移动网络不受此规则影响。外部请求失败（`ok=false`）时忽略。
 
 国内运营商常给整段地址批量生成 PTR，因此国内宽带即使 PTR 内嵌 IP 也不会被当作“单户”证据。同一 ASN 下电信 / 联通的移动与固网无法区分。
 
@@ -95,6 +107,9 @@
 - **存什么**：只存三列：`ip_hash`、`fp_hash`、`day`（UTC 日期）。`ip_hash = HMAC-SHA256(IP_HASH_SALT, "v4:<IP>")`（IPv6 按 /64 前缀：`"v6/64:<前缀>"`），`fp_hash = HMAC-SHA256(IP_HASH_SALT, "fp:<指纹哈希>")`，各截取 128 位。不存原始 IP、指纹明细、UA、时间戳或 Cookie。指纹哈希本身由浏览器本地计算（UA、屏幕、时区、语言、Canvas、WebGL、字体等拼接后取 64 位哈希）。
 - **去重**：主键 `(ip_hash, fp_hash, day)`，同一设备同一天重复访问只算一行。
 - **每日上限**：同一 `ip_hash`（IPv4 单个地址 / IPv6 同一 /64）每天最多新记录 `SEEN_DAILY_CAP` 个指纹（默认 30），防止脚本伪造指纹刷高设备数、刷写入额度。先读当天行数，满额直接返回、不写；写入语句本身带条件（`INSERT … SELECT … WHERE 当天行数 < 上限`），并发请求也不会超额；满额后本 isolate 记住该 IP 当天已满，之后只做一次主键点查（判断这个浏览器是否早已计入），**不再写 D1**。响应带 `capped` / `alreadyCounted`，`observed.dailyCap` / `observed.cappedToday`，页面会注明「今天这个 IP 上新出现的浏览器已达上限」。
+- **全站每日上限**：全站当天新写入的 `ip_seen` 行数达到 `SEEN_GLOBAL_DAILY_CAP`（默认 15000）后，**当天暂停统计**，UTC 0 点（北京时间 8 点）自动恢复。计数放在 `seen_daily(day, n)` 计数器表（迁移 `0002_seen_daily.sql`；只有日期和数字，不含 IP / 指纹），每成功写入一行 +1；检查时与单 IP 计数在同一条查询里按主键读 1 行，不做 `COUNT(*)` 全天扫描；写入语句也带「计数器 < 上限」条件，并发不会超额；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。暂停时 `POST /api/seen` 仍返回 200：`{ ok: true, recorded: false, paused: true, pausedReason: "global_cap", message: "本站统计今日已暂停…IP 检测不受影响" }`，`observed.pausedToday = true`；页面在「本站观测」处注明，**IP 检测、评分、人数类型估算完全不受影响**。`/api/health` 的 `seen.globalDailyCap` / `seen.pausedToday` 可查看当前设置。
+  - **为什么默认 15000 而不是 5 万**：D1 免费额度是每天 10 万「写入行」，并且**索引行、DELETE 都计入**（[D1 定价](https://developers.cloudflare.com/d1/platform/pricing/)）。每新增 1 行 ≈ 表 1 + `day` 索引 1 + 计数器 1 = 3 行写入，30 天后清理删除 ≈ 再 2 行；15000 × 3 + 15000 × 2 ≈ 7.5 万行 / 天（最坏情况），留出余量。付费计划可以调高。
+  - 没有做按 /48 的单独上限：单 IP（IPv6 按 /64）上限 + 严格限流 + 全站上限已能兜住写入额度，再加一个 /48 计数器每次写入还要多写 1 行。
 - **保留**：只保留最近 30 天。每天 cron（`17 19 * * *` UTC）清理，另外每个 isolate 每小时在上报时顺带清理一次。
 - **谁能看到**：只对“查询自己 IP”展示；`/api/ip?ip=其他IP` 永远不返回观测数（`observed.shown = false`）。
 - **调用限制**：`/api/seen` 只接受同源 `POST`（`Origin` 必须与本站一致，`Sec-Fetch-Site` 若存在须为 `same-origin`，`content-type: application/json`，请求体 ≤ 512 字节），并有独立的严格限流（IPv6 按 /64 计）。
@@ -195,6 +210,8 @@ npx wrangler d1 create checkmyip                       # 1. 记下输出里的 d
 #                                                        2. 编辑 wrangler.toml：把「# >>> D1 BEGIN」与「# <<< D1 END」之间
 #                                                           5 行开头的 "# " 去掉，database_id 换成第 1 步的 ID
 npm run db:migrate:remote                              # 3. 即 wrangler d1 migrations apply checkmyip --remote
+#                                                        （从 v0.3.1 升级：也要重跑这一步，应用新增的 0002_seen_daily.sql；
+#                                                         未应用时「本站观测」会显示暂时不可用，IP 检测不受影响）
 openssl rand -hex 32 | npx wrangler secret put IP_HASH_SALT   # 4. ≥16 字符的随机盐
 npm run deploy                                         # 5.
 ```
@@ -287,6 +304,7 @@ npm run build:data     # 即 node scripts/build-data.mjs
 | `LOOKUP_RATE_LIMIT` | var | `20` | 缺少 `LOOKUP_LIMITER` 绑定时的兜底阈值 |
 | `SEEN_RATE_LIMIT` | var | `10` | 缺少 `SEEN_LIMITER` 绑定时的兜底阈值 |
 | `SEEN_DAILY_CAP` | var | `30` | 本站观测：每个 IP（IPv6 按 /64）每天最多新记录的浏览器指纹数（1–1000） |
+| `SEEN_GLOBAL_DAILY_CAP` | var | `15000` | 本站观测：全站每天最多新写入的行数（1–10000000），达到后当天暂停统计、IP 检测不受影响；见「本站观测」 |
 | `RATE_LIMIT_MULTIPLIER` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：本地放宽限流 ×N（最多 1000）并改用进程内计数 |
 | `ALLOWED_ORIGINS` | var | 空（仅同源） | 允许跨域调用的来源，逗号分隔 |
 | `SELF_LIMITER` / `LOOKUP_LIMITER` / `SEEN_LIMITER` | ratelimit 绑定 | 已启用 | 见「限流」 |

@@ -9,6 +9,10 @@ export const SEEN_SHORT_DAYS = 7;
 // 每个 ip_hash（IPv4 地址 / IPv6 /64）每天最多新记录多少个不同指纹。
 // 防止有人用脚本伪造大量指纹刷高自己 IP 的「设备数」，也保护 D1 的写入额度：达到上限后不再写库。
 export const SEEN_DAILY_CAP_DEFAULT = 30;
+// 全站每天最多新写入多少行 ip_seen（所有 IP 合计），达到后当天暂停统计（IP 检测不受影响），UTC 0 点自动恢复。
+// D1 免费额度为每天 10 万「写入行」，且索引行也计入：每新增 1 行 ≈ 表 1 + day 索引 1 + 计数器 1 = 3 行写入，
+// 30 天后清理删除再 ≈ 2 行；默认 15000 → 最坏约 15000×3 + 15000×2 = 7.5 万行/天，留出余量。
+export const SEEN_GLOBAL_DAILY_CAP_DEFAULT = 15000;
 const HASH_BYTES = 16;
 const FP_RE = /^[0-9a-f]{8,64}$/i;
 
@@ -22,6 +26,12 @@ export function seenCap(env) {
   const n = Math.floor(Number(env.SEEN_DAILY_CAP));
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 1000) : SEEN_DAILY_CAP_DEFAULT;
 }
+
+export function seenGlobalCap(env) {
+  const n = Math.floor(Number(env.SEEN_GLOBAL_DAILY_CAP));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 10_000_000) : SEEN_GLOBAL_DAILY_CAP_DEFAULT;
+}
+export const SEEN_PAUSED_MESSAGE = '本站统计今日已暂停（全站今日新增记录已达上限），UTC 0 点（北京时间 8 点）自动恢复；IP 检测不受影响';
 
 const keyCache = new Map();
 async function hmacHex(secret, msg) {
@@ -47,7 +57,10 @@ export function dayStr(t = Date.now(), minusDays = 0) {
 // 本 isolate 内已知「今天已满额」的 ip_hash：跳过计数与写入，只做一次主键点查判断「是否早已计入」。按天自然失效。
 const cappedMemo = new Map();
 const CAPPED_MEMO_MAX = 10_000;
-export function _resetCappedMemo() { cappedMemo.clear(); }
+// 本 isolate 内已知「全站今天已暂停」：之后的请求不再读计数器、不再写，只做一次主键点查。
+let globalPaused = null; // `${day}|${globalCap}`
+export function _resetCappedMemo() { cappedMemo.clear(); globalPaused = null; }
+export const globalPausedToday = (env, now = Date.now()) => globalPaused === `${dayStr(now)}|${seenGlobalCap(env)}`;
 
 /**
  * 记录一次「这个 IP 上出现了这个指纹」。
@@ -56,31 +69,51 @@ export function _resetCappedMemo() { cappedMemo.clear(); }
  *   写入语句本身也带条件（INSERT … SELECT … WHERE 当天行数 < 上限），并发请求也不会超出上限；
  * - 满额后记在本 isolate 的内存里，之后同 IP 当天的请求不再计数、不再写 D1，
  *   只按主键点查一次本指纹今天是否已计入（让满额前已计入的浏览器仍显示「已计入」）。
- * 返回 { inserted, capped, dup }
+ * - 全站当天新增行数达到 seenGlobalCap 后暂停（paused）：计数器 seen_daily 与单 IP 计数在同一条查询里读出（1 次往返），
+ *   写入条件同时检查全站计数器；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。
+ * 返回 { inserted, capped, dup, paused }
  */
 export async function recordSeen(env, parsed, fp, now = Date.now()) {
   const cap = seenCap(env);
   const day = dayStr(now);
   const ih = await ipHash(env, parsed);
   const memoKey = `${ih}|${day}`;
+  const gcap = seenGlobalCap(env);
+  const pausedKey = `${day}|${gcap}`;
   const fh = await fpHash(env, fp);
-  if (cappedMemo.get(memoKey) === cap) {
+  const ipMemo = cappedMemo.get(memoKey) === cap;
+  if (ipMemo || globalPaused === pausedKey) {
     const hit = await env.DB.prepare('SELECT 1 AS x FROM ip_seen WHERE ip_hash = ?1 AND fp_hash = ?2 AND day = ?3').bind(ih, fh, day).first();
-    return { inserted: false, capped: true, dup: !!hit, memo: true };
+    return { inserted: false, capped: ipMemo, dup: !!hit, paused: globalPaused === pausedKey, memo: true };
   }
-  const row = await env.DB.prepare('SELECT COUNT(*) AS n, COUNT(CASE WHEN fp_hash = ?2 THEN 1 END) AS mine FROM ip_seen WHERE ip_hash = ?1 AND day = ?3')
-    .bind(ih, fh, day).first();
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n, COUNT(CASE WHEN fp_hash = ?2 THEN 1 END) AS mine, (SELECT n FROM seen_daily WHERE day = ?3) AS g FROM ip_seen WHERE ip_hash = ?1 AND day = ?3',
+  ).bind(ih, fh, day).first();
   const n = Number(row?.n || 0);
-  if (Number(row?.mine || 0) > 0) return { inserted: false, capped: n >= cap, dup: true };
-  if (n >= cap) { remember(memoKey, cap); return { inserted: false, capped: true, dup: false }; }
+  const g = Number(row?.g || 0);
+  const paused = g >= gcap;
+  if (paused) globalPaused = pausedKey;
+  if (Number(row?.mine || 0) > 0) return { inserted: false, capped: n >= cap, dup: true, paused };
+  if (paused) return { inserted: false, capped: n >= cap, dup: false, paused: true };
+  if (n >= cap) { remember(memoKey, cap); return { inserted: false, capped: true, dup: false, paused: false }; }
   const r = await env.DB.prepare(
-    'INSERT OR IGNORE INTO ip_seen (ip_hash, fp_hash, day) SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM ip_seen WHERE ip_hash = ?1 AND day = ?3) < ?4',
-  ).bind(ih, fh, day, cap).run();
+    'INSERT OR IGNORE INTO ip_seen (ip_hash, fp_hash, day) SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM ip_seen WHERE ip_hash = ?1 AND day = ?3) < ?4'
+    + ' AND COALESCE((SELECT n FROM seen_daily WHERE day = ?3), 0) < ?5',
+  ).bind(ih, fh, day, cap, gcap).run();
   const inserted = (r?.meta?.changes ?? 0) > 0;
-  // 没写进去又不是重复 → 并发下刚好被别的请求占满
-  const capped = inserted ? n + 1 >= cap : true;
-  if (capped) remember(memoKey, cap);
-  return { inserted, capped, dup: false };
+  if (inserted) {
+    // 计数器 +1（主键 upsert，1 行写入）；失败不影响本次记录
+    await env.DB.prepare('INSERT INTO seen_daily (day, n) VALUES (?1, 1) ON CONFLICT (day) DO UPDATE SET n = n + 1').bind(day).run().catch(() => {});
+    if (g + 1 >= gcap) globalPaused = pausedKey;
+    const capped = n + 1 >= cap;
+    if (capped) remember(memoKey, cap);
+    return { inserted: true, capped, dup: false, paused: false };
+  }
+  // 没写进去又不是重复 → 并发下刚好被别的请求占满（单 IP 或全站）；再点查一次计数器区分原因
+  const g2 = Number((await env.DB.prepare('SELECT n FROM seen_daily WHERE day = ?1').bind(day).first())?.n || 0);
+  if (g2 >= gcap) { globalPaused = pausedKey; return { inserted: false, capped: false, dup: false, paused: true }; }
+  remember(memoKey, cap);
+  return { inserted: false, capped: true, dup: false, paused: false };
 }
 function remember(k, cap) {
   if (cappedMemo.size >= CAPPED_MEMO_MAX) cappedMemo.clear();
@@ -98,7 +131,9 @@ export async function countSeen(env, parsed, now = Date.now()) {
 
 /** 删除 30 天前的数据（写入时惰性触发 + 每日 cron） */
 export async function cleanupSeen(env, now = Date.now()) {
-  const r = await env.DB.prepare('DELETE FROM ip_seen WHERE day < ?1').bind(dayStr(now, SEEN_WINDOW_DAYS - 1)).run();
+  const cutoff = dayStr(now, SEEN_WINDOW_DAYS - 1);
+  const r = await env.DB.prepare('DELETE FROM ip_seen WHERE day < ?1').bind(cutoff).run();
+  await env.DB.prepare('DELETE FROM seen_daily WHERE day < ?1').bind(cutoff).run().catch(() => {});
   return { deleted: r?.meta?.changes ?? 0 };
 }
 
