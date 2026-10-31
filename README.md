@@ -44,7 +44,7 @@
 
 其他接口：
 
-- `GET /api/health`：版本、各限流桶使用的是绑定还是进程内兜底（`rateLimit.*.mode = binding | memory`）、本站统计是否启用，以及 `warnings` 数组（缺少绑定、未配置 D1 / 盐时会列出）。
+- `GET /api/health`：版本、各限流桶使用的是绑定还是进程内兜底（`rateLimit.*.mode = binding | memory | memory-dev`）、限流键口径（`rateLimitKey`）、本站统计是否启用及每日上限（`seen.dailyNewDeviceCap`），以及 `warnings` 数组（缺少绑定、未配置 D1 / 盐时会列出）。
 - `GET /api/meta`：数据更新时间与来源状态。
 - `POST /api/seen`：本站观测上报，见「预估多少人在用这个 IP」。
 
@@ -78,8 +78,26 @@
 | 国内固网宽带（电信 / 联通等 IPv4） | 约 1–数十人（可能共享出口） | 低 |
 | 家宽且 PTR 内嵌该 IP（每户一条反解） | 约 1–5 人（单户家庭） | 中 |
 | 家宽且 PTR 为住宅关键词（不含 IP） | 约 1–5 人（单户家庭） | 低 |
+| ASN 不在内置库，但 PTR 为宽带用户写法（见下） | 按家宽估算（通常约 1–5 人） | 低 |
 | 其他家宽 | 约 1–10 人（家庭或小型网络） | 低 |
 | IPv6 家宽 | 约 1–5 人（单户家庭） | 中 |
+
+**ASN 不在内置库时看 PTR**：内置 ASN 库只收录了大运营商和云厂商，很多地区性家宽运营商（如瑞士 Init7 AS13030、Sunrise AS6730）不在库里。此时如果反向解析是宽带用户类写法，就按家庭宽带估算，置信度固定为「低」。例：`85-195-230-77.fiber7.init7.net`、`77-57-100-20.dclient.hispeed.ch`、`adsl-84-226-12-34.adslplus.ch` → 约 1–5 人；`dns9.quad9.net`（AS19281 在库内，为数据中心）不受影响。
+
+PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）以**整词**匹配为主，只对拆不开的粘连词做少量子串检查：
+
+1. 先把 PTR 按 `.` / `-` / `_` / 数字切成字母词（`fiber7` → `fiber`，`hsd1` → `hsd`）。**公共后缀不参与任何判断**：最后一级（`.net`、`.mx`），以及「两字母国家域 + 常见二级」（`.com.mx`、`.co.uk`、`.net.br`，见 `PTR_SLD`）。这是简化判断，没有引入完整的公共后缀列表（PSL），少数特殊后缀可能拆得不准。
+2. **机房词优先** → 判为数据中心（整词；拆不开的粘连词里出现 `hosting` / `server` / `vps` / `datacenter` / `dedicated` / `colocation` / `kubernetes` / `cloud` 子串也算，如 `cloudprovider`；其中 `cloud` 子串较常见于运营商品牌，PTR 同时有明确家宽词时只取消家宽判断（`dsl.mcloud.ru` → 无信号），没有家宽词时才判机房）：`server` / `srv` / `vps` / `vds` / `hosting` / `hosted` / `colo` / `dedicated` / `baremetal` / `datacenter` / `cloud` / `compute` / `ec2` 以及容器平台 `gke` / `aks` / `eks` / `k8s` / `kube` / `kubernetes` / `cluster`（另有已知云域名列表）。
+3. `static` 等 → 静态（商业）。
+4. **排除词**：只看**可注册域名之前的标签**（`mx.dynect.net` 的 `mx` 算；Telmex `…prod-infinitum.com.mx` 的 `mx` 是国家后缀，不算）。出现 `vpn` / `proxy` / `node` / `mail` / `mx` / `smtp` / `host` / `ns` / `dns` / `www` / `web` / `relay` / `tor` / `exit` / `cdn` / `edge` / `gw` / `gateway` / `router` / `core` / `nat` / `vm` / `worker` 等服务 / 平台类词时，**不判家宽**（也不足以判机房，结果为「无信号」）。拆不开的粘连词里出现 `host` / `vpn` / `proxy` / `mail` / `smtp` / `relay` / `gateway` / `router` / `crawler` / `scanner` 子串也一样（`webhost`、`fiberhost`、`vpnpool`、`myproxy`）。
+   - **`host` 紧跟编号不排除**：英国 BT（`host86-128-12-34.range86-128.btcentralplus.com`）、比利时 VOO（`host-109-89-10-20.dynamic.voo.be`）用 `host<数字>` / `host-<数字>` 命名家宽；这种写法不屏蔽，并且 `host` 后紧跟完整 IP 编号（`host-?\d{1,3}([.-]\d{1,3}){1,3}`）时本身就按家宽写法计（关键词显示为 `host（host86-128-12-34）`）。单独的 `host`、`host.` 开头、`webhost`、`mailhost`、`hosting`（机房）仍按上面处理；`host123.example.net` 这种只有一段数字的不算家宽（无信号）。主机名部分（注册域名之前的标签，不含 `dedibox.fr` 这类注册域名本身）出现机房暗示词（`dedi` / `ded` / `dc` / `rack` / `metal` / `bm` / `kvm` / `xen` / `virt` / `virtual`，`dedi` 在主机名部分内另按子串，如 `dedibox-1`）时，`host` + 编号不放行（`dedi-host-1-2-3-4.example.com` → 无信号）；`dedicated` / `vps` / `server` / `srv` / `colo` / `cloud` / `hosting` 本身就是机房词，直接判数据中心。注意：只检查主机名部分，所以 `host-1-2-3-4.dedibox.fr` 这种机房词只出现在注册域名里的，目前仍会按家宽写法计。
+5. 家宽词必须是**整词**：`ppp` / `pppoe` / `adsl` / `dsl` / `vdsl` / `xdsl` / `cable` / `kabel` / `dyn` / `dynamic` / `dynip` / `pool` / `dhcp` / `broadband` / `fiber` / `fibre` / `ftth` / `cust` / `customer(s)` / `client(s)` / `subscriber` / `user(s)` / `cpe` / `home` / `residential` / `dialup` / `hsd` / `hsi` / `mobile` 等；或者是能**完整拆成**家宽词 + 常见后缀（`d` / `s` / `x` / `plus` / `ip` / `modem` / `net` / `line`）的复合词，如 `dclient`、`adslplus`、`cablemodem`。拆不完的不算：`fiberhost`、`liverpool`、`dyndns`、`poolside` 都**不**命中。
+
+正例（测试覆盖，格式按实际 DoH 反查结果）：BT `host86-128-12-34.range86-128.btcentralplus.com`、VOO `host-1-2-3-4.voo.be`、Telmex `dsl-2-1-150-189-dynamic.prod-infinitum.com.mx`、Init7 `…fiber7.init7.net`、Sunrise `…dclient.hispeed.ch` / `adsl-….adslplus.ch`、Comcast `c-73-….hsd1.fl.comcast.net` → 家宽；ASN 不在库内时按家宽（低）估算。Telmex 另一种写法 `acceso-187.140.1.2.prod-infinitum.com.mx` 没有家宽词，结果为无信号（不会因 `.mx` 被屏蔽）。
+
+反例（测试覆盖）：`webhost-1.example.net` / `1-2-3-4.webhost.example.net` / `fiberhost-1.example.net` → 无信号（`host`）；`cloudprovider-1.example.com` → 数据中心（`cloud`）；`vpn-pool-1.example.net` / `1-2-3-4.vpnpool.example` → 无信号（`vpn`）；`gke-prod-default-pool-…` → 数据中心；`mx.dynect.net`、`mx1.dsl.example.com.mx` → 无信号（`mx`）；`proxy-7.pool…` / `node-12.dsl…` / `mail.cable…` / `host.dsl…` → 无信号。
+
+**外部数据说是机房时不按家宽估算**：配置了 `IPAPI_IS_KEY` 后，如果 ipapi.is 标记该 IP 为数据中心（`is_datacenter`），而 PTR 看起来像家宽，则以外部数据为准：ASN 不在内置库 → 类型判为数据中心、PTR 不加分，人数显示「服务器 IP」（不显示 1–5 人）；ASN 在库内且为家宽运营商 → 类型为商业宽带（低），人数显示「无法估算（外部数据标记为机房）」。移动网络不受此规则影响。外部请求失败（`ok=false`）时忽略。
 
 国内运营商常给整段地址批量生成 PTR，因此国内宽带即使 PTR 内嵌 IP 也不会被当作“单户”证据。同一 ASN 下电信 / 联通的移动与固网无法区分。
 
@@ -91,30 +109,25 @@
 
 - **存什么**：只存三列：`ip_hash`、`fp_hash`、`day`（UTC 日期）。`ip_hash = HMAC-SHA256(IP_HASH_SALT, "v4:<IP>")`（IPv6 按 /64 前缀：`"v6/64:<前缀>"`），`fp_hash = HMAC-SHA256(IP_HASH_SALT, "fp:<指纹哈希>")`，各截取 128 位。不存原始 IP、指纹明细、UA、时间戳或 Cookie。指纹哈希本身由浏览器本地计算（UA、屏幕、时区、语言、Canvas、WebGL、字体等拼接后取 64 位哈希）。
 - **去重**：主键 `(ip_hash, fp_hash, day)`，同一设备同一天重复访问只算一行。
+- **每日上限**：同一 `ip_hash`（IPv4 单个地址 / IPv6 同一 /64）每天最多新记录 `SEEN_DAILY_CAP` 个指纹（默认 30），防止脚本伪造指纹刷高设备数、刷写入额度。先读当天行数，满额直接返回、不写；写入语句本身带条件（`INSERT … SELECT … WHERE 当天行数 < 上限`）；D1 按语句串行执行，条件判断和插入在同一条语句里完成，并发请求不会超过上限（见下条的并发测试）。条件插入没有写入时，先按主键查本指纹今天是否已在库里：同一浏览器并发上报两次（例如两个标签页）时，后到的那次是主键冲突，按「已计入」返回，**不算满额、不记入内存**；只有本指纹确实不在且行数确实达到上限时才算满额（全站计数器达到上限时为暂停）。`npm run stress:seen` 的第二部分验证这一点；满额后本 isolate 记住该 IP 当天已满，之后只做一次主键点查（判断这个浏览器是否早已计入），**不再写 D1**。响应带 `capped` / `alreadyCounted`，`observed.dailyCap` / `observed.cappedToday`，页面会注明「今天这个 IP 上新出现的浏览器已达上限」。
+- **全站每日上限**：全站当天新写入的 `ip_seen` 行数达到 `SEEN_GLOBAL_DAILY_CAP`（默认 15000）后，**当天暂停统计**，UTC 0 点（北京时间 8 点）自动恢复。计数放在 `seen_daily(day, n)` 计数器表（迁移 `0002_seen_daily.sql`；只有日期和数字，不含 IP / 指纹），每成功写入一行 +1；检查时与单 IP 计数在同一条查询里按主键读 1 行，不做 `COUNT(*)` 全天扫描；写入时把「带条件的插入（单 IP 行数 < 单 IP 上限 且 计数器 < 全站上限）」和「计数器 +1（仅当上一条确实插入了一行，`WHERE changes() > 0`）」放进**同一个 `env.DB.batch`**——D1 的 batch 是一个事务、按顺序执行，两条语句之间不会插进别的请求的写入，因此计数器始终等于当天实际写入行数，并发也不会超额。并发验证：`npm run stress:seen`（`scripts/stress-seen-d1.mjs`，通过 wrangler 的 `getPlatformProxy` 用本地 D1（Miniflare）对 1000 个不同 IP 同时调用 `recordSeen`，全站上限 50）→ 实际写入 50 行、计数器 50；改成 batch 之前同一测试写入 1000 行。第二部分：200 个 IP 各用同一指纹并发上报两次 → 200 次写入、200 次「已计入」、0 次满额，之后每个 IP 的新指纹都能写入（v0.3.3 在同一测试里 200 个 IP 全被误记为满额、新指纹 0 个写入）。`npm test` 里另有一个模拟延迟的同类测试。注意这是本地 D1 的结果，没有在线上 Cloudflare 环境实测；`ip_seen` 的单 IP 上限同理（同一条件插入语句）；暂停后本 isolate 记住，之后只做主键点查、不读计数器、不写。暂停时 `POST /api/seen` 仍返回 200：`{ ok: true, recorded: false, paused: true, pausedReason: "global_cap", message: "本站统计今日已暂停…IP 检测不受影响" }`，`observed.pausedToday = true`；页面在「本站观测」处注明，**IP 检测、评分、人数类型估算完全不受影响**。`/api/health` 的 `seen.globalDailyCap` / `seen.pausedToday` 可查看当前设置。
+  - **为什么默认 15000 而不是 5 万**：D1 免费额度是每天 10 万「写入行」，并且**索引行、DELETE 都计入**（[D1 定价](https://developers.cloudflare.com/d1/platform/pricing/)）。每新增 1 行 ≈ 表 1 + `day` 索引 1 + 计数器 1 = 3 行写入，30 天后清理删除 ≈ 再 2 行；15000 × 3 + 15000 × 2 ≈ 7.5 万行 / 天（最坏情况），留出余量。付费计划可以调高。
+  - 没有做按 /48 的单独上限：单 IP（IPv6 按 /64）上限 + 严格限流 + 全站上限已能兜住写入额度，再加一个 /48 计数器每次写入还要多写 1 行。
 - **保留**：只保留最近 30 天。每天 cron（`17 19 * * *` UTC）清理，另外每个 isolate 每小时在上报时顺带清理一次。
 - **谁能看到**：只对“查询自己 IP”展示；`/api/ip?ip=其他IP` 永远不返回观测数（`observed.shown = false`）。
-- **调用限制**：`/api/seen` 只接受同源 `POST`（`Origin` 必须与本站一致，`Sec-Fetch-Site` 若存在须为 `same-origin`，`content-type: application/json`，请求体 ≤ 512 字节），并有独立的严格限流。
+- **调用限制**：`/api/seen` 只接受同源 `POST`（`Origin` 必须与本站一致，`Sec-Fetch-Site` 若存在须为 `same-origin`，`content-type: application/json`，请求体 ≤ 512 字节），并有独立的严格限流（IPv6 按 /64 计）。
 - **含义**：这是“本站见过的不同浏览器数”，不是这个 IP 的真实用户数。同一人换浏览器、清理数据会多算；没访问过本站的人不会被算进去。
-- 没有绑定 D1 或没有设置盐（少于 16 个字符视为未设置）时，页面显示「本站统计未启用」，不会写入任何东西，也不会用未加盐的哈希。
+- **默认关闭**：`wrangler.toml` 里的 `[[d1_databases]]` 默认是注释掉的。没有 D1 绑定、表不存在或没有设置盐（少于 16 个字符视为未设置）时，页面显示「本站统计未启用」（表缺失 / 查询出错时为「本站统计暂时不可用」，`error: "db_error"`），其余功能照常，不会写入任何东西，也不会用未加盐的哈希。
 
-启用步骤：
+启用步骤见「部署到 Cloudflare」。更换盐会让旧数据无法再与新访问对应（相当于重新计数）。
 
-```bash
-npx wrangler d1 create checkmyip            # 把输出的 database_id 填入 wrangler.toml 的 [[d1_databases]]
-npm run db:migrate:remote                   # 即 wrangler d1 migrations apply checkmyip --remote
-openssl rand -hex 32 | npx wrangler secret put IP_HASH_SALT
-npx wrangler deploy
-```
-
-`wrangler.toml` 中的 `database_id` 默认是占位符 `00000000-…`，本地开发可直接使用；部署前必须换成真实 ID。不想启用时，可以注释掉 `[[d1_databases]]`，页面会显示「本站统计未启用」。更换盐会让旧数据无法再与新访问对应（相当于重新计数）。
-
-本地测试：
+本地测试（不用改 `wrangler.toml`）：
 
 ```bash
-npm run db:migrate:local                    # wrangler d1 migrations apply checkmyip --local
-echo "IP_HASH_SALT=$(openssl rand -hex 32)" >> .dev.vars
-npm run dev
-# 模拟多个设备：
+npm run db:migrate:local    # 生成 wrangler.local-d1.toml（已 gitignore，D1 段已启用、本地用全 0 ID），再对本地库执行迁移
+npm run dev:d1              # 用 wrangler.local-d1.toml 启动 wrangler dev --local
+# .dev.vars 里需要有 IP_HASH_SALT（.dev.vars.example 已带一个本地用的值）
+# 模拟多个设备（fp 为 8–64 位十六进制）：
 curl -X POST http://127.0.0.1:8787/api/seen -H 'Origin: http://127.0.0.1:8787' \
      -H 'content-type: application/json' -d '{"fp":"a1b2c3d4e5f60718"}'
 curl http://127.0.0.1:8787/cdn-cgi/local/scheduled   # 手动触发清理 cron
@@ -143,6 +156,7 @@ scripts/test-ranges.mjs  IP 段匹配测试（与原始 CIDR 暴力比对）
 scripts/test-rules.mjs   ASN / PTR / 评分规则测试
 scripts/test-sharing.mjs 共用人数估算规则测试
 scripts/test-seen.mjs    D1 观测计数测试（node:sqlite 模拟 D1，执行真实迁移）
+scripts/stress-seen-d1.mjs 本地 D1 并发压测（1000 并发 / 全站上限 50，检查写入行数不超上限）
 scripts/stamp-assets.mjs 给 index.html 中的静态资源加 ?v=<内容哈希>
 migrations/              D1 表结构
 scripts/bench-ranges.mjs 冷启动 CPU 时间测量
@@ -155,12 +169,14 @@ public/                  前端页面（index.html、assets/、config.js）
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars     # 本地开发变量，可设置 DEV_IP 模拟访问者
-npx wrangler dev                   # 或 npm run dev（--local 模式）
+cp .dev.vars.example .dev.vars     # 本地开发变量：DEV_IP（模拟访问者）、RATE_LIMIT_MULTIPLIER 等
+npm run dev                        # 盖资源版本号后 wrangler dev --local（不绑定 D1）；带 D1 用 npm run dev:d1
 # 打开 http://127.0.0.1:8787
 ```
 
-本地没有 `CF-Connecting-IP`，Worker 会在 `DEV_MODE=true` 时依次使用 `DEV_IP` → ip.sb → ipify 获取本机出口 IP 作为“访问者 IP”（仅本地开发使用，线上直接读 `CF-Connecting-IP`）。
+本地没有真实的 `CF-Connecting-IP`（`wrangler dev` 给的是 127.0.0.1），`DEV_MODE=true` 时 Worker 用 `DEV_IP` 作为“访问者 IP”；没有设置时，「查询自己的 IP」返回错误并提示在 `.dev.vars` 设置 `DEV_IP`。**不会**再向 ip.sb / ipify 等第三方查询本机出口 IP（线上直接读 `CF-Connecting-IP`）。
+
+本地放宽限流：`.dev.vars` 里设置 `RATE_LIMIT_MULTIPLIER=10`（`.dev.vars.example` 已带）。仅在 `DEV_MODE=true` 时生效：三个桶的阈值 ×N（最多 ×1000），并改用进程内计数（绑定的阈值写死在 `wrangler.toml`，运行时无法放大）；`/api/health` 的 `rateLimit.*.mode` 显示 `memory-dev`，`warnings` 中会注明。线上不要设置。
 
 模拟所有外部查询失败（检查「数据不完整」状态，仅 `DEV_MODE=true` 时生效）：
 
@@ -171,14 +187,14 @@ npx wrangler dev --local --var DEV_SIMULATE_FAIL:true
 单元测试与性能（不需要启动 dev）：
 
 ```bash
-npm test               # IP 段匹配（约 21 万次检查）+ ASN / PTR / 评分规则 + 共用人数估算 + D1 计数 + 资源版本号检查
+npm test               # IP 段匹配（约 21 万次检查）+ ASN / PTR / 评分规则 + 共用人数估算 + D1 计数与每日上限 + 限流键（IPv6 /64）+ 资源版本号检查
 npm run bench          # 冷启动 CPU：每次新开 node 进程导入并做第一次查询
 ```
 
 冒烟测试（需先启动 dev）：
 
 ```bash
-npm run smoke                                         # 默认测试一组 IP（遇到 429 会按 retry-after 等待重试）
+npm run smoke                                         # 默认测试一组 IP；有错误或命中 429 时退出码为 1（需 RATE_LIMIT_MULTIPLIER ≥ 2）
 node scripts/smoke-test.mjs http://127.0.0.1:8787 8.8.8.8 114.222.1.1
 ```
 
@@ -186,9 +202,25 @@ node scripts/smoke-test.mjs http://127.0.0.1:8787 8.8.8.8 114.222.1.1
 
 ```bash
 npx wrangler login
-npx wrangler d1 create checkmyip     # 可选，见「本站观测」；不用则注释掉 [[d1_databases]]
-npm run deploy                       # 先执行 build:assets 再 wrangler deploy
+npm run deploy                       # 先盖资源版本号再 wrangler deploy；默认不绑定 D1，可直接部署
 ```
+
+`wrangler.toml` 不含任何占位 `database_id`（旧版的全 0 UUID 会让 `wrangler deploy` 报错 10021）。也没有依赖 wrangler 的 D1 自动创建：在 TOML 配置下它不会把创建出的 ID 写回文件，之后 `wrangler d1 migrations apply --remote` 找不到 `database_id` 而失败。
+
+**启用「本站观测」（可选）**：
+
+```bash
+npx wrangler d1 create checkmyip                       # 1. 记下输出里的 database_id
+#                                                        2. 编辑 wrangler.toml：把「# >>> D1 BEGIN」与「# <<< D1 END」之间
+#                                                           5 行开头的 "# " 去掉，database_id 换成第 1 步的 ID
+npm run db:migrate:remote                              # 3. 即 wrangler d1 migrations apply checkmyip --remote
+#                                                        （从 v0.3.1 升级：也要重跑这一步，应用新增的 0002_seen_daily.sql；
+#                                                         未应用时「本站观测」会显示暂时不可用，IP 检测不受影响）
+openssl rand -hex 32 | npx wrangler secret put IP_HASH_SALT   # 4. ≥16 字符的随机盐
+npm run deploy                                         # 5.
+```
+
+部署后访问 `/api/health`：`seen.enabled` 应为 `true`；为 `false` 时 `seen.reason` 会说明原因（`no_db` / `no_salt`）。
 
 ### 静态资源缓存与版本号
 
@@ -236,9 +268,11 @@ npm run build:assets   # 即 node scripts/stamp-assets.mjs，重写 index.html �
 
 | 绑定 | 用途 | 默认 | 键 |
 |---|---|---|---|
-| `SELF_LIMITER` | 查询自己的 IP（`/api/ip`） | 60 次 / 60 秒（宽松） | `self:<访问者 IP>` |
-| `LOOKUP_LIMITER` | 查询其他 IP（`/api/ip?ip=`） | 20 次 / 60 秒（较严） | `lookup:<访问者 IP>` |
-| `SEEN_LIMITER` | 本站观测上报（`POST /api/seen`） | 10 次 / 60 秒（严格） | `seen:<访问者 IP>` |
+| `SELF_LIMITER` | 查询自己的 IP（`/api/ip`） | 60 次 / 60 秒（宽松） | `self:<访问者键>` |
+| `LOOKUP_LIMITER` | 查询其他 IP（`/api/ip?ip=`） | 20 次 / 60 秒（较严） | `lookup:<访问者键>` |
+| `SEEN_LIMITER` | 本站观测上报（`POST /api/seen`） | 10 次 / 60 秒（严格） | `seen:<访问者键>` |
+
+**访问者键**取自 `CF-Connecting-IP`：IPv4 为单个地址（`v4:<IP>`），**IPv6 为所在 /64**（`v6/64:<前 64 位>`）。一户家宽 / 一台 VPS 通常分到整段 /64 甚至更大，按单个 IPv6 地址计数可以随手换地址绕过限流；绑定和进程内兜底用的是同一个键（`src/lib/ratelimit.js` 的 `limiterKey()`，与本站观测的 `ip_hash` 口径一致）。
 
 ```toml
 [[ratelimits]]
@@ -273,13 +307,16 @@ npm run build:data     # 即 node scripts/build-data.mjs
 | `SELF_RATE_LIMIT` | var | `60` | 缺少 `SELF_LIMITER` 绑定时的进程内兜底阈值（次 / 分钟） |
 | `LOOKUP_RATE_LIMIT` | var | `20` | 缺少 `LOOKUP_LIMITER` 绑定时的兜底阈值 |
 | `SEEN_RATE_LIMIT` | var | `10` | 缺少 `SEEN_LIMITER` 绑定时的兜底阈值 |
+| `SEEN_DAILY_CAP` | var | `30` | 本站观测：每个 IP（IPv6 按 /64）每天最多新记录的浏览器指纹数（1–1000） |
+| `SEEN_GLOBAL_DAILY_CAP` | var | `15000` | 本站观测：全站每天最多新写入的行数（1–10000000），达到后当天暂停统计、IP 检测不受影响；见「本站观测」 |
+| `RATE_LIMIT_MULTIPLIER` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：本地放宽限流 ×N（最多 1000）并改用进程内计数 |
 | `ALLOWED_ORIGINS` | var | 空（仅同源） | 允许跨域调用的来源，逗号分隔 |
 | `SELF_LIMITER` / `LOOKUP_LIMITER` / `SEEN_LIMITER` | ratelimit 绑定 | 已启用 | 见「限流」 |
-| `DB` | D1 绑定 | 已启用（占位 ID） | 本站观测；部署前填真实 `database_id`，见「本站观测」 |
+| `DB` | D1 绑定 | 默认注释掉（不启用） | 本站观测；启用步骤见「部署到 Cloudflare」 |
 | `IP_HASH_SALT` | secret | — | 本站观测的 HMAC 盐，至少 16 个字符；未设置时观测功能关闭 |
 | `DEV_SIMULATE_FAIL` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：模拟所有外部查询失败 |
 | `DEV_MODE` | var | 未设置 | `true` 时忽略 `request.cf`，用于本地开发 |
-| `DEV_IP` | var | 未设置 | 本地开发时模拟的访问者 IP |
+| `DEV_IP` | var | 未设置 | 本地开发时模拟的访问者 IP（本地「查询自己的 IP」必需，不再自动查询本机出口 IP） |
 | `IPAPI_IS_KEY` | secret | — | 可选，ipapi.is |
 | `PROXYCHECK_KEY` | secret | — | 可选，proxycheck.io |
 | `ABUSEIPDB_KEY` | secret | — | 可选，AbuseIPDB 滥用评分 |
@@ -294,7 +331,7 @@ npm run build:data     # 即 node scripts/build-data.mjs
 - 1.1.1.1 等 Cloudflare 自有服务地址不在其公布的代理段中，仅通过 ASN 识别为数据中心。
 - 中国移动等运营商同一 ASN 同时承载家庭宽带和 4G/5G，无法精确区分，页面会给出提示。
 - 缺少限流绑定时，限流只是 isolate 内存级别；配置绑定后也是按节点的近似计数。
-- 不在内置 ASN 库中的网络：完全无法识别时扣 25 分、标记「未知网络」；按名称关键词猜到类型时，置信度固定为「低」，并注明「该 ASN 不在内置库中，类型按名称推测」，未识别为风险的关键词网络也会扣 5 分。
+- 不在内置 ASN 库中的网络：完全无法识别时扣 10 分、标记「未知网络」并附说明（内置库只收录大运营商和云厂商，很多地区性家宽也会落到这里）；这一项**单独不会抬高风险等级**（计算风险时把这 10 分加回），置信度为「低」；PTR 为宽带用户写法时类型判为家庭宽带。按名称关键词猜到类型时，置信度固定为「低」，并注明「该 ASN 不在内置库中，类型按名称推测」，未识别为风险的关键词网络也会扣 5 分。
 - 「预估多少人在用这个 IP」只是按类型的估算；本站观测数只统计访问过本站的浏览器，两者都不是真实用户数。
 - 默认未接入任何信誉库（IP 黑名单 / 代理库）。使用代理或 VPN 的家宽 IP 仍可能得到高分，页面与 API（`analysis.reputation`）会明确提示；配置 `IPAPI_IS_KEY` / `PROXYCHECK_KEY` / `ABUSEIPDB_KEY` 后才会参考外部信誉数据。
 - 当地理 / ASN 接口全部失败时，结果标记为「数据不完整」（`analysis.incomplete = true`），分数封顶 60、风险至少为「中」，不会误报为“干净”。

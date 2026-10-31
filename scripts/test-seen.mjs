@@ -4,25 +4,38 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseIP } from '../src/lib/ip.js';
-import { seenStatus, recordSeen, countSeen, cleanupSeen, validFp, dayStr } from '../src/lib/seen.js';
+import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, validFp, dayStr, ipKey, SEEN_DAILY_CAP_DEFAULT, _resetCappedMemo, seenGlobalCap, SEEN_GLOBAL_DAILY_CAP_DEFAULT, globalPausedToday } from '../src/lib/seen.js';
+import { limiterKey } from '../src/lib/ratelimit.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
 
-function fakeD1() {
+// latency=true：每次调用先让出事件循环（模拟网络往返），让并发请求的语句真正交错执行
+const tick = () => new Promise((r) => setImmediate(r));
+function fakeD1({ latency = false } = {}) {
   const db = new DatabaseSync(':memory:');
   const dir = new URL('../migrations/', import.meta.url);
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
+  const stats = { prepares: 0, writes: 0, rowsWritten: 0 };
   return {
-    raw: db,
+    raw: db, stats,
     prepare(sql) {
+      stats.prepares++;
       const st = db.prepare(sql);
       let args = [];
       const api = {
         bind(...a) { args = a; return api; },
-        async run() { const r = st.run(...args); return { success: true, meta: { changes: Number(r.changes) } }; },
-        async first() { return st.get(...args) ?? null; },
+        async run() { if (latency) await tick(); const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; },
+        async first() { if (latency) await tick(); return st.get(...args) ?? null; },
       };
+      api._exec = () => { const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; };
       return api;
+    },
+    // 与 D1 一样：batch 内的语句在一个事务里按顺序执行
+    async batch(list) {
+      if (latency) await tick();
+      stats.batches = (stats.batches || 0) + 1;
+      db.exec('BEGIN');
+      try { const out = list.map((x) => x._exec()); db.exec('COMMIT'); return out; } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
   };
 }
@@ -71,6 +84,130 @@ const other = { DB: fakeD1(), IP_HASH_SALT: 'another-salt-abcdef0123456789' };
 await recordSeen(other, A, fps[0], now);
 const h1 = DB.raw.prepare('SELECT ip_hash FROM ip_seen LIMIT 1').get().ip_hash;
 eq('不同盐 → 不同哈希', other.DB.raw.prepare('SELECT ip_hash FROM ip_seen').get().ip_hash !== h1, true);
+
+// ---------- v0.3.1：每个 ip_hash 每天新指纹上限 ----------
+_resetCappedMemo();
+eq('默认上限 30', [SEEN_DAILY_CAP_DEFAULT, seenCap({}), seenCap({ SEEN_DAILY_CAP: '5' }), seenCap({ SEEN_DAILY_CAP: 'x' }), seenCap({ SEEN_DAILY_CAP: '0' })], [30, 30, 5, 30, 30]);
+const capEnv = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef' };
+const C = parseIP('198.51.100.23');
+const fpN = (i) => i.toString(16).padStart(16, '0');
+let capIns = 0, lastCapped = null;
+for (let i = 0; i < 30; i++) { const r = await recordSeen(capEnv, C, fpN(i), now); if (r.inserted) capIns++; lastCapped = r.capped; }
+eq('前 30 个指纹都写入，第 30 个时标记满额', [capIns, lastCapped], [30, true]);
+const st0 = { ...capEnv.DB.stats };
+const over = [];
+for (let i = 30; i < 100; i++) over.push(await recordSeen(capEnv, C, fpN(i), now));
+eq('满额后不再写 D1（写入 0 次 / 0 行），每次请求只做 1 次主键点查', [capEnv.DB.stats.writes - st0.writes, capEnv.DB.stats.rowsWritten - st0.rowsWritten, capEnv.DB.stats.prepares - st0.prepares], [0, 0, over.length]);
+{
+  const again = await recordSeen(capEnv, C, fpN(0), now);
+  eq('满额后，早已计入的浏览器仍判为已计入（dup=true）', [again.inserted, again.capped, again.dup], [false, true, true]);
+}
+eq('超出上限的 70 个都不写入', [over.every((r) => !r.inserted && r.capped), (await countSeen(capEnv, C, now)).devices30d], [true, 30]);
+// 新 isolate（内存记忆为空）：先读后判，同样不写
+_resetCappedMemo();
+const st1 = { ...capEnv.DB.stats };
+const r31 = await recordSeen(capEnv, C, fpN(31), now);
+eq('新 isolate：满额只读一次、不写', [r31.inserted, r31.capped, capEnv.DB.stats.writes - st1.writes, capEnv.DB.stats.prepares - st1.prepares], [false, true, 0, 1]);
+// 已记录过的指纹再来：不新增
+_resetCappedMemo();
+eq('满额后已有指纹再来：不新增', (await recordSeen(capEnv, C, fpN(3), now)).inserted, false);
+// 其它 IP 不受影响；第二天重新计数
+eq('其它 IP 不受影响', (await recordSeen(capEnv, parseIP('198.51.100.24'), fpN(500), now)).inserted, true);
+eq('次日重新计数', (await recordSeen(capEnv, C, fpN(999), now + day)).inserted, true);
+// 条件写入：即使绕过预读（并发请求同时通过预读），也写不进第 31 行
+_resetCappedMemo();
+const capEnv2 = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef', SEEN_DAILY_CAP: '3' };
+const D = parseIP('203.0.113.77');
+const par = await Promise.all([0, 1, 2, 3, 4, 5].map((i) => recordSeen(capEnv2, D, fpN(1000 + i), now)));
+eq('并发 6 个、上限 3：只写入 3 个', [par.filter((r) => r.inserted).length, (await countSeen(capEnv2, D, now)).devices30d], [3, 3]);
+// IPv6：同一 /64 下不同地址共享上限
+_resetCappedMemo();
+const capEnv3 = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef', SEEN_DAILY_CAP: '5' };
+let v6ins = 0;
+for (let i = 0; i < 20; i++) { const r = await recordSeen(capEnv3, parseIP(`2001:db8:aa:bb:${(i + 1).toString(16)}::1`), fpN(2000 + i), now); if (r.inserted) v6ins++; }
+eq('IPv6 换地址（同一 /64）也共享上限', v6ins, 5);
+// 计数与限流用的是同一个键
+eq('ipKey 与限流键一致', [ipKey(parseIP('2001:db8:aa:bb::1')).key, limiterKey('2001:db8:aa:bb:ffff::9')], ['v6/64:20010db800aa00bb', 'v6/64:20010db800aa00bb']);
+
+// v0.3.2：全站每日新增行上限（SEEN_GLOBAL_DAILY_CAP）
+eq('全站上限默认 15000 / 可配置 / 非法值回落默认', [SEEN_GLOBAL_DAILY_CAP_DEFAULT, seenGlobalCap({}), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '50000' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: 'x' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '0' }), seenGlobalCap({ SEEN_GLOBAL_DAILY_CAP: '1e9' })], [15000, 15000, 50000, 15000, 15000, 10000000]);
+_resetCappedMemo();
+const gEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '5' };
+const gIps = Array.from({ length: 12 }, (_, i) => parseIP(`192.0.2.${i + 1}`));
+const gRes = [];
+for (let i = 0; i < 5; i++) gRes.push(await recordSeen(gEnv, gIps[i], fpN(3000 + i), now));
+eq('全站上限 5：前 5 个不同 IP 都写入，第 5 个之后本 isolate 记为暂停', [gRes.every((r) => r.inserted && !r.paused), globalPausedToday(gEnv, now)], [true, true]);
+eq('计数器 seen_daily 当天 = 5', gEnv.DB.raw.prepare('SELECT n FROM seen_daily WHERE day = ?').get(dayStr(now)).n, 5);
+const gSt = { ...gEnv.DB.stats };
+const gOver = [];
+for (let i = 5; i < 12; i++) gOver.push(await recordSeen(gEnv, gIps[i], fpN(3000 + i), now));
+eq('达到全站上限后：paused=true、不写入、0 次写、每请求只 1 次主键点查', [gOver.every((r) => r.paused && !r.inserted && !r.capped), gEnv.DB.stats.writes - gSt.writes, gEnv.DB.stats.prepares - gSt.prepares], [true, 0, gOver.length]);
+eq('ip_seen 当天只有 5 行', gEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen WHERE day = ?').get(dayStr(now)).c, 5);
+{
+  const again = await recordSeen(gEnv, gIps[0], fpN(3000), now);
+  eq('暂停后，早已计入的浏览器仍判为已计入', [again.inserted, again.paused, again.dup], [false, true, true]);
+}
+// 新 isolate（内存为空）：读一次（含计数器）即知暂停，不写
+_resetCappedMemo();
+const gSt2 = { ...gEnv.DB.stats };
+const gNew = await recordSeen(gEnv, gIps[11], fpN(3999), now);
+eq('新 isolate：1 次读取即判定暂停、不写', [gNew.paused, gNew.inserted, gEnv.DB.stats.writes - gSt2.writes, gEnv.DB.stats.prepares - gSt2.prepares], [true, false, 0, 1]);
+eq('暂停不影响读取计数（countSeen 照常）', (await countSeen(gEnv, gIps[0], now)).devices30d, 1);
+// 次日自动恢复
+eq('次日自动恢复写入', [(await recordSeen(gEnv, gIps[11], fpN(4000), now + day)).inserted, globalPausedToday(gEnv, now + day)], [true, false]);
+// 并发：即使同时通过预读，条件写入也不超过全站上限
+_resetCappedMemo();
+const gEnv2 = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '3' };
+const gPar = await Promise.all(Array.from({ length: 8 }, (_, i) => recordSeen(gEnv2, parseIP(`198.18.0.${i + 1}`), fpN(5000 + i), now)));
+eq('并发 8 个不同 IP、全站上限 3：只写入 3 行，其余 paused', [gPar.filter((r) => r.inserted).length, gPar.filter((r) => r.paused).length, gEnv2.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c], [3, 5, 3]);
+// v0.3.3：写入与计数器 +1 在同一 batch（事务）里：1000 个并发、全站上限 50 → 恰好 50 行，计数器 = 行数
+_resetCappedMemo();
+{
+  const gEnv3 = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'glob-salt-0123456789abcdef', SEEN_GLOBAL_DAILY_CAP: '50' };
+  const ipN = (i) => parseIP(`11.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+  const res = await Promise.all(Array.from({ length: 1000 }, (_, i) => recordSeen(gEnv3, ipN(i), fpN(70000 + i), now)));
+  const rows = gEnv3.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c;
+  const ctr = gEnv3.DB.raw.prepare('SELECT n FROM seen_daily WHERE day = ?').get(dayStr(now)).n;
+  eq('并发 1000、全站上限 50：ip_seen ≤ 50 且计数器 = 行数', [rows, ctr, res.filter((r) => r.inserted).length, res.filter((r) => r.paused).length], [50, 50, 50, 950]);
+}
+_resetCappedMemo();
+// v0.3.4：同一浏览器并发上报两次（两个标签页）：主键冲突不是「满额」——只 1 行、另一次为「已计入」、不标记满额，之后新指纹照常写入
+{
+  const dEnv = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'dup-salt-0123456789abcdef' };
+  const ip = parseIP('203.0.113.77');
+  const two = await Promise.all([recordSeen(dEnv, ip, fpN(90001), now), recordSeen(dEnv, ip, fpN(90001), now)]);
+  const rows = () => dEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c;
+  eq('并发同指纹两次：只写 1 行', rows(), 1);
+  eq('并发同指纹两次：一次写入、一次已计入，都不是满额 / 暂停',
+    two.map((r) => [r.inserted, r.dup, r.capped, r.paused]).sort(), [[false, true, false, false], [true, false, false, false]]);
+  const next = await recordSeen(dEnv, ip, fpN(90002), now);
+  eq('并发同指纹之后：同 IP 新指纹仍然写入（没有被记成满额）', [next.inserted, next.capped, next.memo ?? false, rows()], [true, false, false, 2]);
+  // 更多并发：同一指纹 20 次 + 另外 3 个新指纹同时到达
+  const many = await Promise.all([...Array.from({ length: 20 }, () => recordSeen(dEnv, ip, fpN(90003), now)), ...[90004, 90005, 90006].map((k) => recordSeen(dEnv, ip, fpN(k), now))]);
+  eq('并发同指纹 ×20 + 3 个新指纹：共 6 行、1+3 次写入、19 次已计入、无满额', [rows(), many.filter((r) => r.inserted).length, many.filter((r) => r.dup).length, many.filter((r) => r.capped).length], [6, 4, 19, 0]);
+  eq('计数器与行数一致', dEnv.DB.raw.prepare('SELECT n FROM seen_daily').get().n, 6);
+}
+_resetCappedMemo();
+// 并发同指纹 + 单 IP 真的满额：满额仍然正确识别（上限 2，已有 1 行；同指纹 ×2 与 2 个新指纹并发）
+{
+  const dEnv = { DB: fakeD1({ latency: true }), IP_HASH_SALT: 'dup-salt-0123456789abcdef', SEEN_DAILY_CAP: '2' };
+  const ip = parseIP('203.0.113.78');
+  await recordSeen(dEnv, ip, fpN(91000), now);
+  const res = await Promise.all([recordSeen(dEnv, ip, fpN(91000), now), recordSeen(dEnv, ip, fpN(91000), now), recordSeen(dEnv, ip, fpN(91001), now), recordSeen(dEnv, ip, fpN(91002), now)]);
+  eq('上限 2：同指纹两次为已计入，两个新指纹一写一满额', [res[0].dup, res[1].dup, res.filter((r) => r.inserted).length, res.filter((r) => !r.dup && !r.inserted && r.capped).length,
+    dEnv.DB.raw.prepare('SELECT COUNT(*) AS c FROM ip_seen').get().c], [true, true, 1, 1, 2]);
+}
+_resetCappedMemo();
+// 清理同时删除 30 天前的计数器行
+{
+  const cEnv = { DB: fakeD1(), IP_HASH_SALT: 'glob-salt-0123456789abcdef' };
+  await recordSeen(cEnv, gIps[0], fpN(1), now - 40 * day);
+  _resetCappedMemo();
+  await recordSeen(cEnv, gIps[0], fpN(2), now);
+  await cleanupSeen(cEnv, now);
+  eq('清理同时删除过期 seen_daily 行', cEnv.DB.raw.prepare('SELECT day FROM seen_daily ORDER BY day').all().map((x) => x.day), [dayStr(now)]);
+}
+_resetCappedMemo();
 
 console.log(`${fails ? '✘' : '✔'} D1 计数测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

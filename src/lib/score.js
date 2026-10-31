@@ -9,7 +9,11 @@ const CLS_TEXT = { isp: '固网运营商', mobile: '移动运营商', business: 
 
 export const INCOMPLETE_CAP = 60;
 export const KEYWORD_GUESS_NOTE = '该 ASN 不在内置库中，类型按名称推测。';
-export const UNKNOWN_ASN_PENALTY = -25;
+// 不在内置库、组织名也看不出类型的 ASN：只小扣 10 分，且不单独因此提高风险等级。
+// 内置库只收录了较大的运营商 / 云厂商，很多正常的地区性家宽运营商（如瑞士 Init7、Sunrise，德国 Deutsche Glasfaser，
+// 菲律宾 Globe 的部分 ASN）早期都落在这里；按「中风险」处理会把大量真实家宽误判为可疑。
+export const UNKNOWN_ASN_PENALTY = -10;
+export const UNKNOWN_ASN_NOTE = '内置库只收录了较大的运营商与云厂商，许多地区性家宽运营商也会落在这里，所以只小幅扣分、不单独因此提高风险等级；网络类型的置信度为「低」。';
 const KEYWORD_GUESS_PENALTY = -5;
 export const NO_REPUTATION_NOTE = '未接入信誉库：代理 / VPN 使用的家宽 IP 可能仍显示高分。';
 
@@ -50,8 +54,14 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     case 'edu':
       add('asn', 'ASN 类型', 0, 'good', `${via}，属于${CLS_TEXT.edu}（${asnInfo.name || asn.org || ''}）。`); labels.add('教育网'); break;
     default:
-      // 完全未知的 ASN 不能当作“干净”：加大扣分（100 → 75，风险「中」），类型置信度「低」
-      if (asn.asn) { add('asn', 'ASN 类型', UNKNOWN_ASN_PENALTY, 'warn', `AS${asn.asn}（${asn.org || '未知组织'}）：该 ASN 不在内置库中，类型按名称推测——但组织名也无法判断类型，按未知网络处理，扣分加大、置信度低。`); labels.add('未知网络'); }
+      // 未知 ASN：小扣分（见 UNKNOWN_ASN_PENALTY），类型置信度「低」；有家宽类 PTR 时按家宽（低置信度）判断
+      if (asn.asn) {
+        const extDcHint = external.some((x) => x.ok && x.datacenter);
+        const ptrHint = ptr.signal === 'residential'
+          ? (extDcHint ? `反向解析含宽带用户类关键词「${ptr.keyword}」，但外部数据标记为数据中心，以外部数据为准。` : `反向解析含宽带用户类关键词「${ptr.keyword}」，按家庭宽带（低置信度）判断。`) : '';
+        add('asn', 'ASN 类型', UNKNOWN_ASN_PENALTY, 'warn', `AS${asn.asn}（${asn.org || '未知组织'}）不在内置库中，组织名也无法判断类型。${ptrHint}${UNKNOWN_ASN_NOTE}`);
+        labels.add('未知网络');
+      }
       else add('asn', 'ASN 类型', -10, 'warn', '未能获取 ASN 信息，无法判断网络类型。');
   }
   // 按组织名关键词推测的类型：明确提示、置信度降为「低」，原本不扣分的再扣 5 分
@@ -65,6 +75,7 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
   if (ptr.ptr) {
     if (ptr.signal === 'datacenter') add('ptr', '反向解析 (PTR)', -10, 'bad', `PTR 为 ${ptr.ptr}，包含服务器类关键词「${ptr.keyword}」。`);
     else if (ptr.signal === 'static') add('ptr', '反向解析 (PTR)', -5, 'warn', `PTR 为 ${ptr.ptr}，包含「${ptr.keyword}」，通常是静态 / 商业线路。`);
+    else if (ptr.signal === 'residential' && external.some((x) => x.ok && x.datacenter)) add('ptr', '反向解析 (PTR)', 0, 'warn', `PTR 为 ${ptr.ptr}，包含宽带用户类关键词「${ptr.keyword}」，但外部数据标记为数据中心，不加分。`);
     else if (ptr.signal === 'residential') add('ptr', '反向解析 (PTR)', 5, 'good', `PTR 为 ${ptr.ptr}，包含宽带用户类关键词「${ptr.keyword}」。`);
     else add('ptr', '反向解析 (PTR)', 0, 'info', `PTR 为 ${ptr.ptr}，未包含可判断类型的关键词。`);
   } else {
@@ -141,7 +152,10 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     add('data', '数据不完整', cut, 'warn', `${why}${missing.includes('ptr') ? '，反向解析也失败' : ''}，无法判断网络类型。为避免误报“干净”，分数封顶 ${INCOMPLETE_CAP}、风险至少为「中」，请稍后重试。`);
     score += cut;
   }
-  let risk = score >= 80 ? 'low' : score >= 50 ? 'medium' : 'high';
+  // 「ASN 未收录」只是我们的数据缺口，不是这个 IP 的问题：算风险等级时不计这一项
+  const unknownAsnCut = signals.find((x) => x.key === 'asn' && x.effect === UNKNOWN_ASN_PENALTY && !asnInfo.cls && asn.asn) ? -UNKNOWN_ASN_PENALTY : 0;
+  const riskScore = Math.min(100, score + unknownAsnCut);
+  let risk = riskScore >= 80 ? 'low' : riskScore >= 50 ? 'medium' : 'high';
   if (incomplete && risk === 'low') risk = 'medium';
   if (tor.tor) risk = 'high';
 

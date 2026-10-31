@@ -19,13 +19,17 @@ LOOKUP_TIMEOUT_MS = "3000"
 SELF_RATE_LIMIT = "60"
 LOOKUP_RATE_LIMIT = "20"
 SEEN_RATE_LIMIT = "10"
+# 「本站观测」：同一 IP（IPv6 为 /64）每天最多新记录多少个不同浏览器指纹；满额后当天不再写 D1
+SEEN_DAILY_CAP = "30"
+# 「本站观测」：全站每天最多新写入多少行（保护 D1 免费额度 10 万行写入/天，索引与删除也计入）；达到后当天暂停统计，IP 检测不受影响
+SEEN_GLOBAL_DAILY_CAP = "15000"
 # 允许跨域调用 /api/ip?ip= 的来源（逗号分隔，含协议，不带结尾斜杠）。留空 = 只允许同源。
 # v4./v6. 探测子域会自动允许其主域名；DEV_MODE=true 时额外允许 localhost / 127.0.0.1。
 # /api/seen 永远只接受同源请求，不受此项影响。
 ALLOWED_ORIGINS = ""
 
 # ---------- Cloudflare Rate Limiting 绑定（默认启用，见 README「限流」）----------
-# 按 Cloudflare 节点计数，key 为访问者 IP。缺少某个绑定时 Worker 会退回进程内计数，
+# 按 Cloudflare 节点计数，key 为访问者 IP（IPv4 按地址，IPv6 按 /64，与「本站观测」计数相同）。缺少某个绑定时 Worker 会退回进程内计数，
 # 每个 isolate 打印一次 console.warn，并在 /api/health 的 rateLimit / warnings 中显示。
 # namespace_id 需在你的 Cloudflare 账号内唯一（正整数字符串）；period 只能是 10 或 60。
 [[ratelimits]]
@@ -49,15 +53,24 @@ namespace_id = "1003"
   limit = 10
   period = 60
 
-# ---------- D1：「本站观测到的设备数」（见 README「预估多少人在用这个 IP」）----------
-# 部署前：npx wrangler d1 create checkmyip，把输出的 database_id 填到下面（当前是占位 UUID，仅供本地 --local 使用）；
-# 然后 npx wrangler d1 migrations apply checkmyip --remote，并设置密钥 npx wrangler secret put IP_HASH_SALT。
-# 不想启用：注释掉整个 [[d1_databases]] 块，页面会显示「本站统计未启用」，其余功能不受影响。
-[[d1_databases]]
-binding = "DB"
-database_name = "checkmyip"
-database_id = "00000000-0000-0000-0000-000000000000"   # TODO: 替换为 wrangler d1 create 输出的 ID
-migrations_dir = "migrations"
+# ---------- D1：「本站观测到的设备数」（可选，默认关闭；见 README「部署」与「本站观测」）----------
+# 默认不绑定 D1：页面显示「本站统计未启用」，其余功能不受影响，`wrangler deploy` 可以直接成功。
+# 不再放占位 database_id（全 0 的 UUID 会让真实部署报错 10021）；也不依赖 wrangler 的 D1 自动创建
+# （TOML 配置下 wrangler 不会把创建出的 ID 写回本文件，之后 `d1 migrations apply --remote` 会因缺少 database_id 失败）。
+# 启用步骤：
+#   1. npx wrangler d1 create checkmyip                    → 记下输出里的 database_id
+#   2. 把下面 D1 BEGIN / END 之间 5 行行首的 "# " 去掉，并把 database_id 换成第 1 步的 ID
+#   3. npx wrangler d1 migrations apply checkmyip --remote  （即 npm run db:migrate:remote）
+#   4. npx wrangler secret put IP_HASH_SALT                 （≥16 字符随机串，如 openssl rand -hex 32）
+#   5. npm run deploy
+# 本地试用不必改本文件：npm run db:migrate:local && npm run dev:d1（会生成已被 gitignore 的 wrangler.local-d1.toml）
+# >>> D1 BEGIN
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "checkmyip"
+# database_id = "<wrangler d1 create 输出的 ID>"
+# migrations_dir = "migrations"
+# <<< D1 END
 
 # 每天 19:17 UTC（北京时间 03:17）删除 30 天前的观测记录；写入时也会惰性清理
 [triggers]

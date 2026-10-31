@@ -133,28 +133,116 @@ export function classifyAsn(asn, org) {
   return { cls: null, name: org || null, by: null };
 }
 
-// PTR 反向解析关键词。全部按「词」匹配：PTR 先按 . - _ 与数字切成词，再整词比较，
-// 避免 host-1-2-3-4.isp.net、ghost、localhost 之类误判；只有少数厂商域名按子串匹配。
-const PTR_RES = ['dynamic', 'dyn', 'pool', 'dsl', 'adsl', 'vdsl', 'xdsl', 'ppp', 'pppoe', 'dhcp', 'cable', 'fiber', 'fibre',
-  'ftth', 'home', 'broadband', 'bb', 'cust', 'customer', 'residential', 'user', 'client', 'res', 'cpe', 'wlan', 'mobile',
-  'hsd', 'broad', 'catv'];
+// PTR 反向解析关键词。PTR 按 . - _ 与数字切成词（fiber7 → fiber、hsd1 → hsd），家宽词整词比较（liverpool、dyndns 不算家宽）；
+// 拆不开的粘连词（webhost、cloudprovider、vpnpool）再按子串查少数足够独特的服务器 / 服务类片段；国家后缀（.mx 等）不参与。
+const PTR_RES = new Set(['dynamic', 'dyn', 'dynip', 'pool', 'dsl', 'adsl', 'vdsl', 'xdsl', 'sdsl', 'ppp', 'pppoe', 'dhcp', 'cable',
+  'kabel', 'fiber', 'fibre', 'ftth', 'fttx', 'fttp', 'fttb', 'fttc', 'home', 'broadband', 'broad', 'bb', 'cust', 'customer',
+  'customers', 'residential', 'res', 'user', 'users', 'client', 'clients', 'subscriber', 'cpe', 'wlan', 'mobile',
+  'hsd', 'hsi', 'catv', 'dialup', 'dial']);
+// 复合词（dclient、adslplus、cablemodem、customers、dynip …）：整个词能拆成「家宽词 + 家宽词 / 下列词缀」才算，
+// 拆出任何别的片段都不算（fiberhost = fiber + host ✗，liverpool = liver + pool ✗，dynect = dyn + ect ✗）。
+const PTR_RES_AFFIX = new Set(['d', 's', 'x', 'plus', 'ip', 'ips', 'modem', 'net', 'line']);
 const PTR_STATIC = ['static', 'fixed', 'business', 'biz'];
-// 通用服务器类词（整词）
-const PTR_DC = ['vps', 'vds', 'server', 'servers', 'dedicated', 'colo', 'colocation', 'cloud', 'compute', 'ec2', 'hosting', 'datacenter'];
+// 服务器 / 平台类词（整词，按「字母数字」切词以识别 k8s 等）→ 判为机房
+const PTR_DC = new Set(['vps', 'vds', 'server', 'servers', 'srv', 'dedicated', 'colo', 'colocation', 'cloud', 'compute', 'ec2',
+  'hosting', 'hosted', 'datacenter', 'gke', 'aks', 'eks', 'k8s', 'kube', 'kubernetes', 'cluster', 'baremetal']);
 // 厂商域名（子串）：这些名字足够独特，不会出现在家宽 PTR 中
 const PTR_DC_DOMAINS = ['googleusercontent', 'amazonaws', 'linode', 'vultr', 'hetzner', 'your-server.de', 'ovh.net',
   'contabo', 'digitalocean', 'leaseweb', 'choopa', 'akamaitechnologies'];
+// 服务器类词的粘连写法（myvpsserver、webhosting、cloudprovider …）：在拆不开的词里按子串匹配，这些片段足够独特
+const PTR_DC_SUB = ['hosting', 'server', 'vps', 'datacenter', 'dedicated', 'colocation', 'kubernetes', 'cloud'];
+// 服务 / 基础设施类词（整词）：出现即不按家宽判断，但本身不足以判为机房。
+// 只看「可注册域名」之前的标签（mx.dynect.net 的 mx 算；prod-infinitum.com.mx 的 mx 是国家后缀，不算）。
+// host 例外：host 紧跟编号（host86-…、host-1-2-3-4）是英国 BT、比利时 VOO 等运营商的家宽写法，不屏蔽，见 classifyPtr。
+const PTR_NOT_RES = new Set(['vpn', 'proxy', 'proxies', 'node', 'nodes', 'mail', 'mx', 'smtp', 'imap', 'pop', 'mta', 'host', 'hosts',
+  'ns', 'dns', 'www', 'web', 'relay', 'tor', 'exit', 'cdn', 'edge', 'cache', 'lb', 'api', 'gw', 'gateway', 'router', 'core',
+  'backbone', 'ix', 'peer', 'nat', 'cgnat', 'vm', 'container', 'worker', 'bot', 'crawl', 'crawler', 'scan', 'scanner']);
+// 服务类词的粘连写法（webhost、vpnpool、myproxy …）：在拆不开的词里按子串匹配；只收足够长 / 独特的片段（不含 mx、ns 之类）
+const PTR_NOT_RES_SUB = ['host', 'vpn', 'proxy', 'mail', 'smtp', 'relay', 'gateway', 'router', 'crawler', 'scanner'];
+// 机房暗示词：本身不足以判机房（dc、rack 也可能是运营商机房 / 区域代号），但出现在主机部分时，
+// 「host + 编号」不再按运营商家宽写法放行（dedi-host-1-2-3-4 → 无信号）。dedi 另按子串查（dedibox、mydedi）。
+// dedicated / vps / server / srv / colo / cloud / hosting 等本来就是机房词，见 PTR_DC。
+const PTR_DC_HINT = new Set(['dedi', 'ded', 'dc', 'rack', 'metal', 'bm', 'kvm', 'xen', 'virt', 'virtual']);
+// 机房子串里较「弱」的：cloud 常见于运营商品牌（mcloud、cloudnet 等），PTR 同时有明确家宽词时只取消家宽判断，不判机房
+const PTR_DC_SUB_WEAK = new Set(['cloud']);
+// 国家顶级域下常见的二级后缀（com.mx、co.uk、net.br …），用来粗略确定「可注册域名」（不引入完整的公共后缀列表）
+const PTR_SLD = new Set(['com', 'net', 'org', 'co', 'ne', 'or', 'ac', 'ad', 'go', 'gov', 'gob', 'edu', 'mil', 'nic', 'ltd', 'plc',
+  'sch', 'info', 'biz', 'gen', 'nom', 'int']);
 
-/** PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword } */
+/** 把 PTR 拆成「主机部分」（可注册域名之前的标签）、可注册域名的名字标签、公共后缀 */
+export function splitPtrLabels(low) {
+  const labels = low.split('.').filter(Boolean);
+  let suffix = labels.length > 1 ? 1 : 0;
+  if (labels.length > 2 && /^[a-z]{2}$/.test(labels.at(-1)) && PTR_SLD.has(labels.at(-2))) suffix = 2;
+  const regIdx = labels.length - suffix - 1; // 可注册域名的名字标签
+  return { host: labels.slice(0, Math.max(regIdx, 0)), reg: regIdx >= 0 ? labels[regIdx] : null, suffix: labels.slice(labels.length - suffix) };
+}
+
+/** 词能否拆成 ≤3 段，且每段都是家宽词或词缀、至少一段是家宽词 */
+function resCompound(t) {
+  if (PTR_RES.has(t)) return t;
+  const go = (rest, depth, hasRes, first) => {
+    if (!rest) return hasRes ? first : null;
+    if (depth === 3) return null;
+    for (let i = rest.length; i >= 1; i--) {
+      const piece = rest.slice(0, i);
+      const isRes = PTR_RES.has(piece);
+      if (!isRes && !PTR_RES_AFFIX.has(piece)) continue;
+      const r = go(rest.slice(i), depth + 1, hasRes || isRes, first || (isRes ? piece : null));
+      if (r) return r;
+    }
+    return null;
+  };
+  return go(t, 0, false, null);
+}
+
+/**
+ * PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword, blockedBy? }
+ * 优先级：服务器类 > 静态 / 商业 > 服务 / 基础设施词（不判家宽） > 家宽。
+ * 公共后缀（net、com.mx、co.uk …）不参与任何关键词判断。
+ */
 export function classifyPtr(ptr) {
   if (!ptr) return { signal: null };
   const low = ptr.toLowerCase().replace(/\.$/, '');
-  const tokens = low.split(/[^a-z]+/).filter(Boolean);
-  const dc = PTR_DC.find((k) => tokens.includes(k)) || PTR_DC_DOMAINS.find((k) => low.includes(k));
+  const { host, reg } = splitPtrLabels(low);
+  const named = reg ? [...host, reg] : host; // 去掉公共后缀
+  const namedStr = named.join('.');
+  const hostStr = host.join('.');
+  const tokensOf = (str) => str.split(/[^a-z]+/).filter(Boolean);
+  const tokens = tokensOf(namedStr);
+  const alnum = namedStr.split(/[^a-z0-9]+/).filter(Boolean);
+  const words = [...new Set([...tokens, ...alnum])];
+  // 拆不开的词：不是任何已知词、也不能拆成家宽复合词（webhost、cloudprovider、fiberhost …）
+  const glued = tokens.filter((t) => !PTR_DC.has(t) && !PTR_NOT_RES.has(t) && !PTR_STATIC.includes(t) && !resCompound(t));
+
+  const dc = words.find((t) => PTR_DC.has(t)) || PTR_DC_DOMAINS.find((k) => low.includes(k));
   if (dc) return { signal: 'datacenter', keyword: dc };
+  const dcSub = PTR_DC_SUB.find((k) => glued.some((t) => t.includes(k)));
+  if (dcSub) {
+    // dsl.mcloud.ru：有明确家宽词时 cloud 子串只取消家宽判断（无信号）；cloudprovider 这类没有家宽词的仍判机房
+    if (PTR_DC_SUB_WEAK.has(dcSub) && tokens.some((t) => resCompound(t))) return { signal: null, blockedBy: dcSub };
+    return { signal: 'datacenter', keyword: dcSub };
+  }
   const st = PTR_STATIC.find((k) => tokens.includes(k));
   if (st) return { signal: 'static', keyword: st };
-  const res = PTR_RES.find((k) => tokens.includes(k));
-  if (res) return { signal: 'residential', keyword: res };
+
+  // host 紧跟编号：host86-…、host-1-2-3-4、host1 → 运营商按地址生成的名字，不屏蔽
+  const hostNumbered = /(^|[^a-z0-9])host-?\d/.test(hostStr);
+  const hostBare = /(^|[^a-z0-9])host(?!-?\d)(?![a-z])/.test(hostStr);
+  const hostTokens = tokensOf(hostStr);
+  // 主机部分有机房暗示词（dedi-host-1-2-3-4、host-1-2-3-4.dc2…）时，host + 编号不放行
+  const dcHint = hostNumbered && (hostTokens.find((t) => PTR_DC_HINT.has(t)) || (hostTokens.some((t) => glued.includes(t) && t.includes('dedi')) ? 'dedi' : null));
+  if (dcHint) return { signal: null, blockedBy: `host（${dcHint}）` };
+  const block = hostTokens.find((t) => PTR_NOT_RES.has(t) && !(t === 'host' && !hostBare))
+    || PTR_NOT_RES_SUB.reduce((hit, k) => hit || (glued.some((t) => t.includes(k)) ? k : null), null);
+  if (block) return { signal: null, blockedBy: block };
+
+  for (const t of tokens) {
+    const k = resCompound(t);
+    if (k) return { signal: 'residential', keyword: k === t ? k : `${k}（${t}）` };
+  }
+  // 没有其它家宽词时：host + IP 形式的编号（host86-128-12-34、host-1-2-3-4）按运营商家宽写法处理
+  const hostIp = hostNumbered && hostStr.match(/(?:^|[^a-z0-9])(host-?\d{1,3}(?:[.-]\d{1,3}){1,3})/);
+  if (hostIp) return { signal: 'residential', keyword: `host（${hostIp[1]}）` };
   return { signal: null };
 }
