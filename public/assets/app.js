@@ -399,7 +399,12 @@
       const r = await fetch('/api/seen', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ fp: state.fp.hash }) });
       const j = await r.json().catch(() => null);
       if (!j || !state.self.sharing) return;
-      if (r.ok && j.observed) state.self.sharing.observed = { ...j.observed, includesYou: true };
+      if (r.ok && j.observed) {
+        const included = !!(j.recorded || j.alreadyCounted);
+        const cap = j.observed.dailyCap || 30;
+        const capNote = j.capped ? (included ? `今天这个 IP 上新出现的浏览器已达上限（每天最多计 ${cap} 个），之后的新浏览器今天不再计入。` : `今天这个 IP 上新出现的浏览器已达上限（每天最多计 ${cap} 个），本次访问未计入。`) : '';
+        state.self.sharing.observed = { ...j.observed, includesYou: included, notCounted: capNote };
+      }
       else if (r.status === 429 && state.self.sharing.observed) state.self.sharing.observed = { ...state.self.sharing.observed, notCounted: '本次访问未计入（上报过于频繁，稍后刷新即可）。' };
       else if (j.enabled === false) state.self.sharing.observed = { shown: true, enabled: false, reason: j.reason, message: j.message };
       if (state.view === state.self) renderSharing();

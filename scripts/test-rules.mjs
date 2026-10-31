@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 规则测试：ASN / PTR 分类与评分（含“数据不完整”与信誉库提示）
 import { classifyAsn, classifyPtr } from '../src/lib/asn.js';
-import { analyze, INCOMPLETE_CAP } from '../src/lib/score.js';
+import { analyze, INCOMPLETE_CAP, UNKNOWN_ASN_PENALTY, UNKNOWN_ASN_NOTE } from '../src/lib/score.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
 
@@ -43,7 +43,31 @@ eq('有信誉库', [withRep.reputation.used, withRep.reputation.note], [true, nu
 const q9 = run(19281, 'QUAD9-AS-1');
 eq('Quad9 9.9.9.9 不是低风险', [classifyAsn(19281).cls, q9.type, q9.risk !== 'low'], ['hosting', 'datacenter', true]);
 const unk = run(64999, 'Totally Unknown Org');
-eq('未知 ASN：扣分加大、风险中、置信度低、有提示', [unk.score, unk.risk, unk.confidenceText, unk.signals.find((x) => x.key === 'asn').detail.includes('该 ASN 不在内置库中，类型按名称推测')], [75, 'medium', '低', true]);
+// v0.3.1：未知 ASN 只扣 10 分、附说明，且不单独抬高风险等级
+eq('未知 ASN：扣 10 分、风险低、置信度低、有说明', [unk.score, unk.risk, unk.confidenceText, unk.type, unk.signals.find((x) => x.key === 'asn').effect, unk.signals.find((x) => x.key === 'asn').detail.includes(UNKNOWN_ASN_NOTE)], [90, 'low', '低', 'unknown', UNKNOWN_ASN_PENALTY, true]);
+eq('UNKNOWN_ASN_PENALTY = -10', UNKNOWN_ASN_PENALTY, -10);
+// 未知 ASN 再叠加一个 -5（静态 PTR）仍为低风险；叠加真正的坏信号（PTR 服务器类 -10 + 代理头 -15）才变中
+const unkStatic = run(64999, 'Totally Unknown Org', { ptr: { ptr: 'static-1.example.net', signal: 'static', keyword: 'static' } });
+eq('未知 ASN + 静态 PTR：85 / 低风险', [unkStatic.score, unkStatic.risk], [85, 'low']);
+const unkBad = analyze({ cloud: [], asn: { asn: 64999, org: 'X' }, asnInfo: classifyAsn(64999, 'X'), ptr: { ptr: 'vps1.example.net', signal: 'datacenter', keyword: 'vps' }, tor: { tor: false }, external: [], proxyHeaders: ['Via'], quality: { geoOk: true, ptrOk: true } });
+eq('未知 ASN 不计入风险，但其它坏信号照常生效（65 → 不计未知扣分 75 → 中）', [unkBad.score, unkBad.risk], [65, 'medium']);
+// 真实家宽 PTR（Init7 / Sunrise / 常见写法）+ 未知 ASN → 家宽（低置信度），分数 95
+const resPtrs = ['85-195-230-77.fiber7.init7.net', '77-57-100-20.dclient.hispeed.ch', 'adsl-84-226-12-34.adslplus.ch',
+  'ppp-91-2-3-4.example.de', 'cable-1-2-3-4.example.ph', 'dsl-1-2-3-4.dynamic.example.net', 'dyn-203-0-113-7.example.de',
+  'pool-1-2-3-4.example.com', 'dhcp-1-2-3-4.example.org', 'broadband-1-2.example.net', 'ftth-1-2-3-4.example.de',
+  'customer-1-2-3-4.example.ch', '1-2-3-4.customers.example.ph', 'dynip-1-2-3-4.example.de', 'cablemodem-1.example.org'];
+for (const p of resPtrs) {
+  const c = classifyPtr(p);
+  const r = run(64999, 'Totally Unknown Org', { ptr: { ptr: p, ...c } });
+  eq(`未知 ASN + 家宽 PTR ${p}`, [c.signal, r.type, r.confidenceText, r.score, r.risk], ['residential', 'residential', '低', 95, 'low']);
+}
+// 服务器类词优先：即使同时带家宽词也判为服务器
+for (const p of ['dsl-vps-1.example.net', 'customer-1.hosting.example.com', 'pool1.myvpsserver.example', 'cloud-ppp.example']) eq(`服务器词优先 ${p}`, classifyPtr(p).signal, 'datacenter');
+// 不应误判为家宽
+for (const p of ['dns9.quad9.net', 'r1win8.core.init7.net', 'mail.liverpool.example', 'router.blackpool.example', 'host-1-2-3-4.isp.net']) eq(`非家宽 PTR ${p}`, classifyPtr(p).signal, null);
+// Quad9 9.9.9.9：仍为机房，PTR 不影响
+const q9p = run(19281, 'QUAD9-AS-1', { ptr: { ptr: 'dns9.quad9.net', ...classifyPtr('dns9.quad9.net') } });
+eq('Quad9 + PTR dns9.quad9.net 仍为机房、非低风险', [q9p.type, q9p.risk !== 'low'], ['datacenter', true]);
 const kwIsp = run(64998, 'Example Broadband Telecom');
 const kwSig = kwIsp.signals.find((x) => x.key === 'asn');
 eq('关键词推测：置信度低、提示、扣 5 分', [classifyAsn(64998, 'Example Broadband Telecom').by, kwIsp.confidenceText, kwSig.detail.includes('该 ASN 不在内置库中，类型按名称推测'), kwSig.effect], ['keyword', '低', true, -5]);

@@ -11,6 +11,8 @@ const DEFAULT = [
   // 嵌套 / 重叠段（旧实现只回扫 64 段会漏检）
   ['34.190.0.1', 'Google 34.128.0.0/10'], ['34.183.219.127', 'Google /10 内，旧版漏检'], ['34.186.0.1', 'GCP 段嵌套在 Google /10 内'],
   ['9.9.9.9', 'Quad9 DNS'],
+  // v0.3.1：ASN 未收录、PTR 为家宽写法的真实运营商地址（Init7 / Sunrise 瑞士）
+  ['85.195.230.77', 'Init7（fiber7 PTR）'], ['77.57.100.20', 'Sunrise（dclient PTR）'], ['84.226.12.34', 'Sunrise（adsl PTR）'],
 ];
 let list = args.length ? args.map((a) => [a, '']) : DEFAULT;
 if (!args.length) {
@@ -18,6 +20,11 @@ if (!args.length) {
   list.push([tor, 'Tor 出口(列表第一个 v4)']);
 }
 const rows = [];
+let hit429 = 0;
+try {
+  const h = await (await fetch(`${base}/api/health`)).json();
+  console.error(`限流：lookup=${h.rateLimit?.lookup?.mode}${h.rateLimit?.lookup?.limitPerMinute ? `（${h.rateLimit.lookup.limitPerMinute}/分钟）` : ''}；${(h.warnings || []).join(' / ') || '无警告'}`);
+} catch { /* health 失败不影响测试 */ }
 for (const [ip, note] of list) {
   const t0 = Date.now();
   try {
@@ -26,6 +33,7 @@ for (const [ip, note] of list) {
     for (let i = 0; i < 4; i++) {
       r = await fetch(`${base}/api/ip?ip=${encodeURIComponent(ip)}`, { signal: AbortSignal.timeout(30000) });
       if (r.status !== 429 || i === 3) break;
+      hit429++;
       const wait = Math.min(Number(r.headers.get('retry-after')) || 60, 65);
       console.error(`… ${ip} 被限流（429），${wait}s 后重试`);
       await r.body?.cancel();
@@ -45,3 +53,6 @@ console.log('| IP | 备注 | ASN | 组织 | 位置 | 云厂商段 | 类型 | 置
 console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 for (const r of rows) console.log(r.error ? `| ${r.ip} | ${r.note} | 错误：${r.error} |` :
   `| ${r.ip} | ${r.note} | ${r.asn} | ${r.org} | ${r.loc} | ${r.cloud} | ${r.type} | ${r.conf} | ${r.score} | ${r.risk} | ${r.inc} | ${r.share} | ${r.signals} | ${r.ptr} | ${r.geo} | ${r.ms} |`);
+console.log(`\n共 ${rows.length} 个 IP，错误 ${rows.filter((r) => r.error).length} 个，命中限流（429）${hit429} 次。`);
+// 本地开发应通过 RATE_LIMIT_MULTIPLIER 放宽限流；命中 429 视为失败
+process.exit(rows.some((r) => r.error) || hit429 ? 1 : 0);

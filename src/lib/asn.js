@@ -145,16 +145,30 @@ const PTR_DC = ['vps', 'vds', 'server', 'servers', 'dedicated', 'colo', 'colocat
 const PTR_DC_DOMAINS = ['googleusercontent', 'amazonaws', 'linode', 'vultr', 'hetzner', 'your-server.de', 'ovh.net',
   'contabo', 'digitalocean', 'leaseweb', 'choopa', 'akamaitechnologies'];
 
-/** PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword } */
+// 复合写法：dclient、fiber7、cablemodem、dynip、customers、adslplus、pppoe-… 也算家宽。
+// 包含这些片段即可（片段足够独特）：
+const PTR_RES_SUB = ['dsl', 'ppp', 'dhcp', 'ftth', 'fttx', 'fttp', 'fttb', 'fttc', 'broadband', 'client', 'fiber', 'fibre', 'dynamic', 'dialup'];
+// 只看词首（避免 liverpool / blackpool、kabelsalat 之类出现在词中间时误判）：
+const PTR_RES_PREFIX = ['dyn', 'cust', 'cable', 'kabel', 'pool', 'dial', 'hsd'];
+// 服务器类词的复合写法（myvpsserver、webhosting …）也按片段匹配
+const PTR_DC_SUB = ['hosting', 'server', 'vps', 'datacenter', 'dedicated', 'colocation'];
+
+/**
+ * PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword }
+ * 优先级：服务器类 > 静态 / 商业 > 家宽，任何服务器类词都会压过家宽词。
+ */
 export function classifyPtr(ptr) {
   if (!ptr) return { signal: null };
   const low = ptr.toLowerCase().replace(/\.$/, '');
   const tokens = low.split(/[^a-z]+/).filter(Boolean);
-  const dc = PTR_DC.find((k) => tokens.includes(k)) || PTR_DC_DOMAINS.find((k) => low.includes(k));
+  const dc = PTR_DC.find((k) => tokens.includes(k)) || PTR_DC_DOMAINS.find((k) => low.includes(k))
+    || PTR_DC_SUB.find((k) => tokens.some((t) => t.includes(k)));
   if (dc) return { signal: 'datacenter', keyword: dc };
   const st = PTR_STATIC.find((k) => tokens.includes(k));
   if (st) return { signal: 'static', keyword: st };
-  const res = PTR_RES.find((k) => tokens.includes(k));
+  const res = PTR_RES.find((k) => tokens.includes(k))
+    || PTR_RES_SUB.find((k) => tokens.some((t) => t.includes(k)))
+    || PTR_RES_PREFIX.find((k) => tokens.some((t) => t.startsWith(k)));
   if (res) return { signal: 'residential', keyword: res };
   return { signal: null };
 }

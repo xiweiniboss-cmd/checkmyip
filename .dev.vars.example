@@ -1,11 +1,17 @@
-# 复制为 .dev.vars 供 `npx wrangler dev` 使用（.dev.vars 已加入 .gitignore）
-# 本地没有 CF-Connecting-IP，可指定一个模拟的访问者 IP；不填则自动向 ip.sb / ipify 查询本机出口 IP
-# DEV_IP=114.222.1.1
+# 复制为 .dev.vars 供 `npm run dev` / `npm run dev:d1` 使用（.dev.vars 已加入 .gitignore）
+# 本地没有 CF-Connecting-IP：用 DEV_IP 指定要模拟的访问者公网 IP。
+# 不填时「查询自己的 IP」会返回错误提示（不会再向 ip.sb / ipify 等第三方查询本机出口 IP，与线上行为一致）
+DEV_IP=114.222.1.1
 DEV_MODE=true
+# 本地放宽限流：仅 DEV_MODE=true 时生效，三类阈值 ×N，并改用进程内计数（绑定阈值写死在 wrangler.toml，无法在运行时放大）。
+# 冒烟测试（npm run smoke）一分钟内会发 20+ 次 ?ip= 查询，需要 ≥2；线上不要设置。
+RATE_LIMIT_MULTIPLIER=10
 # IPAPI_IS_KEY=
 # PROXYCHECK_KEY=
 # ABUSEIPDB_KEY=
 # IPINFO_TOKEN=
 # 「本站观测到的设备数」用的哈希盐（本地随便填一个 ≥16 字符的随机串；线上用 wrangler secret put IP_HASH_SALT）
-# 不填则该功能显示「本站统计未启用」
+# 不填，或没有 D1 绑定（npm run dev 默认就没有；npm run dev:d1 才有），该功能显示「本站统计未启用」
 IP_HASH_SALT=change-me-local-dev-only-0123456789
+# 每个 IP / IPv6 /64 每天最多新记录多少个浏览器指纹（默认 30）
+# SEEN_DAILY_CAP=30

@@ -4,7 +4,8 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { parseIP } from '../src/lib/ip.js';
-import { seenStatus, recordSeen, countSeen, cleanupSeen, validFp, dayStr } from '../src/lib/seen.js';
+import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, validFp, dayStr, ipKey, SEEN_DAILY_CAP_DEFAULT, _resetCappedMemo } from '../src/lib/seen.js';
+import { limiterKey } from '../src/lib/ratelimit.js';
 let fails = 0, n = 0;
 const eq = (name, got, exp) => { n++; if (JSON.stringify(got) !== JSON.stringify(exp)) { fails++; console.error(`✘ ${name}: 期望 ${JSON.stringify(exp)} 实际 ${JSON.stringify(got)}`); } };
 
@@ -12,14 +13,16 @@ function fakeD1() {
   const db = new DatabaseSync(':memory:');
   const dir = new URL('../migrations/', import.meta.url);
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) db.exec(readFileSync(new URL(f, dir), 'utf8'));
+  const stats = { prepares: 0, writes: 0, rowsWritten: 0 };
   return {
-    raw: db,
+    raw: db, stats,
     prepare(sql) {
+      stats.prepares++;
       const st = db.prepare(sql);
       let args = [];
       const api = {
         bind(...a) { args = a; return api; },
-        async run() { const r = st.run(...args); return { success: true, meta: { changes: Number(r.changes) } }; },
+        async run() { const r = st.run(...args); stats.writes++; stats.rowsWritten += Number(r.changes); return { success: true, meta: { changes: Number(r.changes) } }; },
         async first() { return st.get(...args) ?? null; },
       };
       return api;
@@ -71,6 +74,50 @@ const other = { DB: fakeD1(), IP_HASH_SALT: 'another-salt-abcdef0123456789' };
 await recordSeen(other, A, fps[0], now);
 const h1 = DB.raw.prepare('SELECT ip_hash FROM ip_seen LIMIT 1').get().ip_hash;
 eq('不同盐 → 不同哈希', other.DB.raw.prepare('SELECT ip_hash FROM ip_seen').get().ip_hash !== h1, true);
+
+// ---------- v0.3.1：每个 ip_hash 每天新指纹上限 ----------
+_resetCappedMemo();
+eq('默认上限 30', [SEEN_DAILY_CAP_DEFAULT, seenCap({}), seenCap({ SEEN_DAILY_CAP: '5' }), seenCap({ SEEN_DAILY_CAP: 'x' }), seenCap({ SEEN_DAILY_CAP: '0' })], [30, 30, 5, 30, 30]);
+const capEnv = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef' };
+const C = parseIP('198.51.100.23');
+const fpN = (i) => i.toString(16).padStart(16, '0');
+let capIns = 0, lastCapped = null;
+for (let i = 0; i < 30; i++) { const r = await recordSeen(capEnv, C, fpN(i), now); if (r.inserted) capIns++; lastCapped = r.capped; }
+eq('前 30 个指纹都写入，第 30 个时标记满额', [capIns, lastCapped], [30, true]);
+const st0 = { ...capEnv.DB.stats };
+const over = [];
+for (let i = 30; i < 100; i++) over.push(await recordSeen(capEnv, C, fpN(i), now));
+eq('满额后不再写 D1（写入 0 次 / 0 行），每次请求只做 1 次主键点查', [capEnv.DB.stats.writes - st0.writes, capEnv.DB.stats.rowsWritten - st0.rowsWritten, capEnv.DB.stats.prepares - st0.prepares], [0, 0, over.length]);
+{
+  const again = await recordSeen(capEnv, C, fpN(0), now);
+  eq('满额后，早已计入的浏览器仍判为已计入（dup=true）', [again.inserted, again.capped, again.dup], [false, true, true]);
+}
+eq('超出上限的 70 个都不写入', [over.every((r) => !r.inserted && r.capped), (await countSeen(capEnv, C, now)).devices30d], [true, 30]);
+// 新 isolate（内存记忆为空）：先读后判，同样不写
+_resetCappedMemo();
+const st1 = { ...capEnv.DB.stats };
+const r31 = await recordSeen(capEnv, C, fpN(31), now);
+eq('新 isolate：满额只读一次、不写', [r31.inserted, r31.capped, capEnv.DB.stats.writes - st1.writes, capEnv.DB.stats.prepares - st1.prepares], [false, true, 0, 1]);
+// 已记录过的指纹再来：不新增
+_resetCappedMemo();
+eq('满额后已有指纹再来：不新增', (await recordSeen(capEnv, C, fpN(3), now)).inserted, false);
+// 其它 IP 不受影响；第二天重新计数
+eq('其它 IP 不受影响', (await recordSeen(capEnv, parseIP('198.51.100.24'), fpN(500), now)).inserted, true);
+eq('次日重新计数', (await recordSeen(capEnv, C, fpN(999), now + day)).inserted, true);
+// 条件写入：即使绕过预读（并发请求同时通过预读），也写不进第 31 行
+_resetCappedMemo();
+const capEnv2 = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef', SEEN_DAILY_CAP: '3' };
+const D = parseIP('203.0.113.77');
+const par = await Promise.all([0, 1, 2, 3, 4, 5].map((i) => recordSeen(capEnv2, D, fpN(1000 + i), now)));
+eq('并发 6 个、上限 3：只写入 3 个', [par.filter((r) => r.inserted).length, (await countSeen(capEnv2, D, now)).devices30d], [3, 3]);
+// IPv6：同一 /64 下不同地址共享上限
+_resetCappedMemo();
+const capEnv3 = { DB: fakeD1(), IP_HASH_SALT: 'cap-salt-0123456789abcdef', SEEN_DAILY_CAP: '5' };
+let v6ins = 0;
+for (let i = 0; i < 20; i++) { const r = await recordSeen(capEnv3, parseIP(`2001:db8:aa:bb:${(i + 1).toString(16)}::1`), fpN(2000 + i), now); if (r.inserted) v6ins++; }
+eq('IPv6 换地址（同一 /64）也共享上限', v6ins, 5);
+// 计数与限流用的是同一个键
+eq('ipKey 与限流键一致', [ipKey(parseIP('2001:db8:aa:bb::1')).key, limiterKey('2001:db8:aa:bb:ffff::9')], ['v6/64:20010db800aa00bb', 'v6/64:20010db800aa00bb']);
 
 console.log(`${fails ? '✘' : '✔'} D1 计数测试 ${n} 项，失败 ${fails} 项`);
 process.exit(fails ? 1 : 0);

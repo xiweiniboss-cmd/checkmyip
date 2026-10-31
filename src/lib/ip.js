@@ -102,3 +102,14 @@ export function ptrName(p) {
   if (p.version === 4) return p.ip.split('.').reverse().join('.') + '.in-addr.arpa';
   return p.v6.toString(16).padStart(32, '0').split('').reverse().join('.') + '.ip6.arpa';
 }
+
+/**
+ * 「同一个用户 / 一户」的网络键：IPv4 按单个地址，IPv6 按 /64 前缀
+ * （同一户的设备、甚至同一设备的隐私地址都各不相同，但通常共用一个 /64）。
+ * 限流与「本站观测」计数共用这一个键，避免 IPv6 用户换地址绕过限流或刷高计数。
+ */
+export function subscriberKey(parsed) {
+  if (!parsed) return null;
+  if (parsed.version === 4) return { key: `v4:${parsed.ip}`, scope: 'ip' };
+  return { key: `v6/64:${(parsed.v6 >> 64n).toString(16).padStart(16, '0')}`, scope: '/64' };
+}

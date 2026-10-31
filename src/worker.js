@@ -8,12 +8,12 @@ import { lookupPtr } from './lib/ptr.js';
 import { isTorExit } from './lib/tor.js';
 import { externalRisk } from './lib/external.js';
 import { analyze } from './lib/score.js';
-import { fetchText } from './lib/http.js';
+import { rateLimited, limiterHealth } from './lib/ratelimit.js';
 import { estimateSharing } from './lib/sharing.js';
-import { seenStatus, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
+import { seenStatus, seenCap, recordSeen, countSeen, cleanupSeen, maybeCleanup, validFp, SEEN_WINDOW_DAYS, SEEN_SHORT_DAYS } from './lib/seen.js';
 import meta from './data/meta.json';
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 
 // ---------- 小工具 ----------
 function json(data, status = 200, extra = {}) {
@@ -83,59 +83,21 @@ async function cached(key, ttl, ctx, producer) {
   return { ...data, cache: 'miss' };
 }
 
-// ---------- 限流 ----------
-// 没有 Origin 的请求（curl、脚本）不受 CORS 约束，真正的保护是限流。
-// 优先使用 Cloudflare Rate Limiting 绑定（wrangler.toml 默认已启用三个），缺失时退回进程内计数
-// （每个 isolate 独立，只能挡住最粗暴的刷接口），并在每个 isolate 里大声 console.warn 一次。
-const LIMITS = {
-  self: { binding: 'SELF_LIMITER', env: 'SELF_RATE_LIMIT', def: 60, text: '查询自己的 IP' },
-  lookup: { binding: 'LOOKUP_LIMITER', env: 'LOOKUP_RATE_LIMIT', def: 20, text: '查询其他 IP（?ip=）' },
-  seen: { binding: 'SEEN_LIMITER', env: 'SEEN_RATE_LIMIT', def: 10, text: '上报设备（/api/seen）' },
-};
-const warned = new Set();
-function limiterMode(env, bucket) {
-  const b = env[LIMITS[bucket].binding];
-  return b && typeof b.limit === 'function' ? 'binding' : 'memory';
-}
-function warnMissingLimiter(env, bucket) {
-  if (warned.has(bucket)) return;
-  warned.add(bucket);
-  const c = LIMITS[bucket];
-  console.warn(`[checkmyip] ⚠️ 未找到 Rate Limiting 绑定 ${c.binding}：「${c.text}」退回进程内限流（每 isolate 独立、可被轻易绕过）。请在 wrangler.toml 中配置 [[ratelimits]] ${c.binding}，详见 README「限流」。`);
-}
-const rl = new Map();
-async function rateLimited(env, bucket, who) {
-  const c = LIMITS[bucket];
-  const b = env[c.binding];
-  if (b && typeof b.limit === 'function') {
-    try { const { success } = await b.limit({ key: `${bucket}:${who}` }); return { limited: !success, via: 'binding' }; }
-    catch (e) { console.warn(`[checkmyip] Rate Limiting 绑定 ${c.binding} 调用失败，本次退回进程内计数：${e}`); }
-  } else warnMissingLimiter(env, bucket);
-  return { limited: memLimited(`${bucket}:${who}`, Number(env[c.env]) || c.def), via: 'memory' };
-}
-function memLimited(key, limit) {
-  const now = Date.now();
-  const e = rl.get(key);
-  if (!e || now - e.t > 60_000) { rl.set(key, { t: now, n: 1 }); if (rl.size > 5000) rl.clear(); return false; }
-  e.n += 1;
-  return e.n > limit;
-}
+// ---------- 限流（逻辑见 src/lib/ratelimit.js：IPv4 按地址、IPv6 按 /64）----------
 const tooMany = (rlr) => json({ ok: false, error: 'rate_limited', message: '请求过于频繁，请稍后再试' }, 429, { 'retry-after': '60', 'x-ratelimit-via': rlr.via });
-const clientKey = (request) => request.headers.get('cf-connecting-ip') || 'local';
+const clientIp = (request) => request.headers.get('cf-connecting-ip');
 
 // ---------- 访问者 IP ----------
+// 线上只信 CF-Connecting-IP；本地开发（DEV_MODE=true 或拿到的是内网地址）用 DEV_IP 模拟访问者。
+// 不再向任何第三方「查询本机出口 IP」：与线上行为一致，也不把开发机 IP 发给外部服务。
 async function resolveVisitor(request, env) {
   const h = request.headers.get('cf-connecting-ip');
   const p = parseIP(h);
   if (p && !bogonReason(p) && env.DEV_MODE !== 'true') return { parsed: p, via: 'cf-connecting-ip', trustCf: true };
-  // 本地开发：CF-Connecting-IP 缺失或为内网地址
   if (env.DEV_IP) { const d = parseIP(env.DEV_IP); if (d) return { parsed: d, via: 'DEV_IP', trustCf: false }; }
-  for (const u of ['https://api-ipv4.ip.sb/ip', 'https://api.ipify.org']) {
-    const r = await fetchText(u, { timeout: 3000 });
-    const d = r.ok && parseIP(r.data.trim());
-    if (d) return { parsed: d, via: `dev-fallback (${new URL(u).host})`, trustCf: false };
-  }
-  return { parsed: p, via: h ? 'cf-connecting-ip' : 'none', trustCf: false };
+  // DEV_MODE 下若请求本身带着公网 CF-Connecting-IP（如通过隧道访问），照样使用
+  if (p && !bogonReason(p)) return { parsed: p, via: 'cf-connecting-ip', trustCf: false };
+  return { parsed: p, via: h ? 'cf-connecting-ip' : 'none', trustCf: false, hint: env.DEV_MODE === 'true' ? '本地开发请在 .dev.vars 设置 DEV_IP=<要模拟的公网 IP>' : null };
 }
 
 function proxyHeaderHints(request) {
@@ -229,7 +191,7 @@ async function handleIp(request, env, ctx, url, pol) {
     if (!pol.allowed) return json({ ok: false, error: 'origin_not_allowed', message: '该来源不允许调用查询接口' }, 403);
     const parsed = parseIP(q);
     if (!parsed) return json({ ok: false, error: 'invalid_ip', message: '请输入有效的 IPv4 或 IPv6 地址' }, 400);
-    const rlr = await rateLimited(env, 'lookup', clientKey(request));
+    const rlr = await rateLimited(env, 'lookup', clientIp(request));
     if (rlr.limited) return tooMany(rlr);
     const bogon = bogonReason(parsed);
     if (bogon) return json({ ok: false, error: 'bogon', ip: parsed.ip, version: parsed.version, message: `${parsed.ip} 是${bogon}，不属于公网 IP，无法查询` }, 422);
@@ -238,12 +200,12 @@ async function handleIp(request, env, ctx, url, pol) {
     data.sharing.observed = { shown: false, reason: 'not_self', message: '本站观测数只对你自己的 IP 显示' };
     return json({ ...data, query: 'lookup' }, 200, { 'x-ratelimit-via': rlr.via });
   }
-  const rlr = await rateLimited(env, 'self', clientKey(request));
+  const rlr = await rateLimited(env, 'self', clientIp(request));
   if (rlr.limited) return tooMany(rlr);
   const v = await resolveVisitor(request, env);
-  if (!v.parsed) return json({ ok: false, error: 'no_ip', message: '无法确定访问者 IP' }, 500);
+  if (!v.parsed) return json({ ok: false, error: 'no_ip', message: v.hint ? `无法确定访问者 IP：${v.hint}` : '无法确定访问者 IP' }, v.hint ? 422 : 500);
   const bogon = bogonReason(v.parsed);
-  if (bogon) return json({ ok: false, error: 'bogon', ip: v.parsed.ip, message: `检测到的 IP ${v.parsed.ip} 是${bogon}` }, 422);
+  if (bogon) return json({ ok: false, error: 'bogon', ip: v.parsed.ip, message: `检测到的 IP ${v.parsed.ip} 是${bogon}${v.hint ? `；${v.hint}` : ''}` }, 422);
   const cf = v.trustCf ? request.cf : null;
   const data = await lookup(v.parsed, { env, ctx, cf, proxyHeaders: v.trustCf ? proxyHeaderHints(request) : [] });
   data.sharing.observed = await observedFor(env, v.parsed);
@@ -261,7 +223,7 @@ async function observedFor(env, parsed) {
   if (!st.enabled) return { shown: true, enabled: false, reason: st.reason, message: st.message };
   try {
     const c = await countSeen(env, parsed);
-    return { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS };
+    return { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env) };
   } catch (e) {
     console.warn(`[checkmyip] D1 查询失败：${e}`);
     return { shown: true, enabled: false, reason: 'db_error', message: '本站统计暂时不可用' };
@@ -274,7 +236,7 @@ async function handleSeen(request, env, ctx, url) {
   const site = request.headers.get('sec-fetch-site');
   if (!origin || origin !== url.origin || (site && site !== 'same-origin')) return json({ ok: false, error: 'origin_not_allowed', message: '仅限本站页面调用' }, 403);
   if (!/^application\/json\b/i.test(request.headers.get('content-type') || '')) return json({ ok: false, error: 'bad_content_type' }, 415);
-  const rlr = await rateLimited(env, 'seen', clientKey(request));
+  const rlr = await rateLimited(env, 'seen', clientIp(request));
   if (rlr.limited) return tooMany(rlr);
   const st = seenStatus(env);
   if (!st.enabled) return json({ ok: true, enabled: false, reason: st.reason, message: st.message });
@@ -284,12 +246,12 @@ async function handleSeen(request, env, ctx, url) {
   try { fp = JSON.parse(raw).fp; } catch { /* 下面统一报错 */ }
   if (!validFp(fp)) return json({ ok: false, error: 'invalid_fp', message: 'fp 必须是 8–64 位十六进制哈希' }, 400);
   const v = await resolveVisitor(request, env);
-  if (!v.parsed || bogonReason(v.parsed)) return json({ ok: false, error: 'no_ip', message: '无法确定访问者 IP' }, 422);
+  if (!v.parsed || bogonReason(v.parsed)) return json({ ok: false, error: 'no_ip', message: v.hint ? `无法确定访问者 IP：${v.hint}` : '无法确定访问者 IP' }, 422);
   try {
     const r = await recordSeen(env, v.parsed, fp);
     maybeCleanup(env, ctx);
     const c = await countSeen(env, v.parsed);
-    return json({ ok: true, enabled: true, recorded: r.inserted, observed: { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS } }, 200, { 'x-ratelimit-via': rlr.via });
+    return json({ ok: true, enabled: true, recorded: r.inserted, alreadyCounted: r.dup === true, capped: r.capped, observed: { shown: true, enabled: true, ...c, windowDays: SEEN_WINDOW_DAYS, shortDays: SEEN_SHORT_DAYS, dailyCap: seenCap(env), cappedToday: r.capped } }, 200, { 'x-ratelimit-via': rlr.via });
   } catch (e) {
     console.warn(`[checkmyip] D1 写入失败：${e}`);
     return json({ ok: false, enabled: false, error: 'db_error', message: '本站统计暂时不可用' }, 503);
@@ -297,12 +259,11 @@ async function handleSeen(request, env, ctx, url) {
 }
 
 function health(env) {
-  const rateLimit = Object.fromEntries(Object.entries(LIMITS).map(([k, c]) => [k, { binding: c.binding, mode: limiterMode(env, k) }]));
-  const warnings = Object.entries(rateLimit).filter(([, x]) => x.mode !== 'binding')
-    .map(([k, x]) => `未配置 Rate Limiting 绑定 ${x.binding}：「${LIMITS[k].text}」正在使用进程内限流（可被绕过）`);
+  const { rateLimit, keying, warnings } = limiterHealth(env);
   const seen = seenStatus(env);
   if (!seen.enabled) warnings.push(seen.message);
-  return { ok: true, version: VERSION, time: new Date().toISOString(), rateLimit, seen: { enabled: seen.enabled, reason: seen.reason || null }, warnings };
+  return { ok: true, version: VERSION, time: new Date().toISOString(), rateLimit, rateLimitKey: keying,
+    seen: { enabled: seen.enabled, reason: seen.reason || null, dailyNewDeviceCap: seenCap(env) }, warnings };
 }
 
 // v4.<域名> / v6.<域名>：只返回访问者 IP 的极简探测接口（这两个子域分别只配 A / AAAA 记录）
