@@ -59,7 +59,8 @@
 
     const badges = [`<span class="badge lg ${TYPE_CLASS[a.type]}"><span class="dot"></span>${esc(a.typeText)}</span>`,
       `<span class="badge lg ${RISK_CLASS[a.risk]}">风险：${esc(a.riskText)}</span>`];
-    for (const lb of a.labels) if (lb !== a.typeText) badges.push(`<span class="badge soft">${esc(lb)}</span>`);
+    if (a.incomplete) badges.push('<span class="badge lg warn" title="部分数据源查询失败，结果可能不准确">⚠ 数据不完整</span>');
+    for (const lb of a.labels) if (lb !== a.typeText && lb !== '数据不完整') badges.push(`<span class="badge soft">${esc(lb)}</span>`);
     $('#ipBadges').innerHTML = badges.join('');
 
     const country = l.country ? `${esc(l.country)}${l.countryCode ? ` <span class="sub2">${esc(l.countryCode)}${l.countryEn && l.countryEn !== l.country ? ' · ' + esc(l.countryEn) : ''}</span>` : ''}` : '—';
@@ -87,8 +88,19 @@
     card.style.setProperty('--gauge-color', color);
     $('#gaugeBar').setAttribute('stroke-dasharray', `${Math.max(0.5, a.score)} 100`);
     animateNum($('#scoreNum'), a.score);
-    $('#scoreLabel').textContent = a.score >= 80 ? '较为纯净' : a.score >= 50 ? '一般' : '纯净度低';
+    $('#scoreLabel').textContent = a.incomplete ? '数据不完整' : a.score >= 80 ? '较为纯净' : a.score >= 50 ? '一般' : '纯净度低';
     $('#scoreSummary').innerHTML = summaryOf(d);
+    const alertEl = $('#scoreAlert');
+    if (a.incomplete) {
+      const MISS = { geo: '地理位置 / ASN', asn: 'ASN', ptr: '反向解析' };
+      const miss = [...new Set((a.missing || []).map((k) => MISS[k]).filter(Boolean))].join('、');
+      alertEl.innerHTML = `<b>数据不完整</b>：${esc(miss || 'ASN')} 查询失败，无法判断网络类型。分数已封顶 60、风险至少为「中」，请稍后重试。`;
+      alertEl.hidden = false;
+    } else alertEl.hidden = true;
+    const rep = $('#repNote');
+    if (a.reputation && !a.reputation.used) { rep.textContent = a.reputation.note; rep.hidden = false; }
+    else if (a.reputation) { rep.textContent = `已参考信誉库：${a.reputation.sources.join('、')}`; rep.hidden = false; }
+    else rep.hidden = true;
     $('#typeText').textContent = a.typeText; $('#riskText').textContent = a.riskText; $('#confText').textContent = a.confidenceText;
 
     $('#signals').innerHTML = a.signals.map((s) => `<li class="signal ${s.level}"><span class="sig-ico">${icon(LEVEL_ICON[s.level] || 'info')}</span>
@@ -104,12 +116,14 @@
     const a = d.analysis, n = d.network;
     const who = esc(n.isp || n.asnName || n.org || '未知运营商');
     const neg = a.signals.filter((x) => x.effect < 0).sort((x, y) => x.effect - y.effect).map((x) => esc(x.name));
+    if (a.incomplete) return `部分数据源查询失败，暂时无法判断 <b>${esc(d.ip)}</b> 的网络类型。`;
     if (a.risk === 'low') return `该 IP 属于 <b>${who}</b>，判断为<b>${esc(a.typeText)}</b>，未发现明显的机房 / 代理特征。`;
     return `该 IP 属于 <b>${who}</b>，判断为<b>${esc(a.typeText)}</b>。主要扣分项：${neg.slice(0, 3).join('、') || '无'}。`;
   }
 
   function renderIpError(msg) {
     $('#scoreSummary').textContent = '';
+    $('#scoreAlert').hidden = true; $('#repNote').hidden = true;
     $('#ipValue').classList.remove('skel');
     $('#ipValue').textContent = '—';
     $('#ipBadges').innerHTML = '';

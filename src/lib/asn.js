@@ -1,6 +1,8 @@
 // 基于 ASN 编号与 AS 组织名称关键词的网络类型判断（人工整理，仅作参考）
-// class: isp(家庭/固网宽带) | mobile(移动网络) | business(商业/企业/骨干) | edu(教育科研) | hosting(数据中心/云) | vpn(已知 VPN/代理托管)
+// class: isp(家庭/固网宽带) | mobile(移动网络) | business(商业/企业专线) | transit(国际骨干/转接) | edu(教育科研) | hosting(数据中心/云) | vpn(已知 VPN/代理托管)
+// mixed: true 表示该 ASN 同时承载家宽与其它用途（移动网络 / 企业专线），判为家宽时置信度只给「中」
 
+const CMCC_NOTE = '中国移动同一 ASN 同时承载家庭宽带与 4G/5G 网络，仅凭 ASN 无法区分二者。';
 const L = (cls, pairs) => pairs.map(([asn, name]) => [asn, { cls, name }]);
 
 const ASN_TABLE = new Map([
@@ -8,7 +10,7 @@ const ASN_TABLE = new Map([
   ...[[9808, '中国移动 CMNET'], [56040, '中国移动 广东'], [56041, '中国移动 浙江'], [56042, '中国移动 山西'],
     [56044, '中国移动'], [56046, '中国移动 江苏'], [56047, '中国移动 湖南'], [56048, '中国移动 北京'],
     [24400, '中国移动 上海'], [24444, '中国移动 山东'], [24445, '中国移动 河南']]
-    .map(([asn, name]) => [asn, { cls: 'isp', name, note: '中国移动同一 ASN 同时承载家庭宽带与 4G/5G 网络，仅凭 ASN 无法区分二者。' }]),
+    .map(([asn, name]) => [asn, { cls: 'isp', name, mixed: true, note: CMCC_NOTE }]),
   // ---------- 中国大陆 · 运营商 ----------
   ...L('isp', [
     [4134, '中国电信 CHINANET'], [4812, '中国电信 上海'], [4811, '中国电信 上海'], [4816, '中国电信 广东'],
@@ -16,8 +18,10 @@ const ASN_TABLE = new Map([
     [17622, '中国联通 广州'], [17623, '中国联通 深圳'],
     [9394, '中国铁通'], [17964, '鹏博士 / 长城宽带'], [4609, '澳门电讯 CTM'],
   ]),
+  // CN2 属于中国电信运营商网络，但大量用于企业专线与跨境精品线路，判为家宽时置信度只给「中」
+  [4809, { cls: 'isp', name: '中国电信 CN2', mixed: true, note: 'CN2 为中国电信精品网，除家宽外也大量用于企业专线与跨境线路。' }],
   ...L('business', [
-    [4809, '中国电信 CN2'], [9929, '中国联通 工业互联网 (A网)'], [10099, '中国联通国际 CUG'],
+    [9929, '中国联通 工业互联网 (A网)'], [10099, '中国联通国际 CUG'],
     [58453, '中国移动国际 CMI'], [4847, '中国电信 (骨干)'],
   ]),
   ...L('edu', [
@@ -47,7 +51,6 @@ const ASN_TABLE = new Map([
     [63023, 'GTHost'], [46844, 'Sharktech'], [54290, 'Hostwinds'], [54825, 'Equinix Metal'], [199524, 'G-Core Labs'],
     [202422, 'G-Core Labs'], [7979, 'Servers.com'], [46475, 'Limestone Networks'], [62240, 'Clouvider'],
     [36236, 'NetActuate'], [32097, 'WholeSale Internet'], [3258, 'xTom'], [62904, 'Eonix'], [19318, 'Interserver'],
-    [174, 'Cogent (含大量机房)'],
   ]),
   // ---------- 已知 VPN / 代理托管 ----------
   ...L('vpn', [
@@ -55,11 +58,14 @@ const ASN_TABLE = new Map([
     [147049, 'PacketHub (NordVPN)'], [136787, 'Tefincom (NordVPN)'], [39351, '31173 Services (Mullvad)'],
     [212238, 'Datacamp (常见 VPN 出口)'],
   ]),
-  // ---------- 海外 · 骨干 / 企业 ----------
-  ...L('business', [
-    [6939, 'Hurricane Electric'], [2914, 'NTT Global IP Network'], [3491, 'PCCW Global'], [1299, 'Arelion (Telia)'],
-    [3356, 'Lumen (Level3)'], [6461, 'Zayo'], [3257, 'GTT'], [6453, 'TATA Communications'], [9304, 'HGC 和记环球电讯'],
-  ]),
+  // ---------- 海外 · 国际骨干 / 转接（transit）----------
+  // 这些网络主要卖 IP 转接与企业专线，也直连大量机房客户，但本身不是机房：小幅扣分，归为商业宽带。
+  ...[[174, 'Cogent', 'Cogent 直连了大量机房 / 主机商客户，地址常被用作服务器出口。'],
+    [6939, 'Hurricane Electric', 'HE 同时提供免费 IPv6 隧道（tunnelbroker），隧道地址常被代理使用。'],
+    [3356, 'Lumen (Level3)'], [2914, 'NTT Global IP Network'], [1299, 'Arelion (Telia)'], [3257, 'GTT'],
+    [3491, 'PCCW Global'], [6461, 'Zayo'], [6453, 'TATA Communications']]
+    .map(([asn, name, note]) => [asn, { cls: 'transit', name, ...(note ? { note } : {}) }]),
+  ...L('business', [[9304, 'HGC 和记环球电讯']]),
   // ---------- 海外 · 移动运营商 ----------
   ...L('mobile', [
     [21928, 'T-Mobile US'], [6167, 'Verizon Wireless'], [22394, 'Verizon Wireless'], [20057, 'AT&T Mobility'],
@@ -115,6 +121,8 @@ export function classifyAsn(asn, org) {
   const n = Number(String(asn ?? '').replace(/^AS/i, ''));
   if (n && ASN_TABLE.has(n)) return { ...ASN_TABLE.get(n), by: 'asn' };
   const s = String(org || '').toLowerCase();
+  // 未收录编号的中国移动省网：同样是家宽与移动网络混用
+  if (/china mobile|cmnet|中国移动/.test(s) && !/international|国际|hong kong|香港/.test(s)) return { cls: 'isp', name: org, by: 'keyword', keyword: 'china mobile', mixed: true, note: CMCC_NOTE };
   if (s.trim()) {
     for (const cls of ['vpn', 'hosting', 'edu', 'mobile', 'isp']) {
       const kw = KW[cls].find((k) => hasWord(s, k));
@@ -124,22 +132,28 @@ export function classifyAsn(asn, org) {
   return { cls: null, name: org || null, by: null };
 }
 
-// PTR 反向解析关键词
-const PTR_RES = ['dynamic', 'dyn', 'pool', 'dsl', 'adsl', 'vdsl', 'ppp', 'pppoe', 'dhcp', 'cable', 'fiber', 'fibre',
-  'ftth', 'home', 'broadband', 'bb', 'cust', 'customer', 'residential', 'user', 'client', 'res', 'cpe', 'wlan', 'mobile', 'hsd', 'broad', 'adsl', 'xdsl', 'catv', 'ip-pool'];
+// PTR 反向解析关键词。全部按「词」匹配：PTR 先按 . - _ 与数字切成词，再整词比较，
+// 避免 host-1-2-3-4.isp.net、ghost、localhost 之类误判；只有少数厂商域名按子串匹配。
+const PTR_RES = ['dynamic', 'dyn', 'pool', 'dsl', 'adsl', 'vdsl', 'xdsl', 'ppp', 'pppoe', 'dhcp', 'cable', 'fiber', 'fibre',
+  'ftth', 'home', 'broadband', 'bb', 'cust', 'customer', 'residential', 'user', 'client', 'res', 'cpe', 'wlan', 'mobile',
+  'hsd', 'broad', 'catv'];
 const PTR_STATIC = ['static', 'fixed', 'business', 'biz'];
-const PTR_DC = ['server', 'srv', 'vps', 'host', 'hosting', 'cloud', 'colo', 'dedicated', 'ded', 'ec2',
-  'compute', 'googleusercontent', 'amazonaws', 'linode', 'vultr', 'hetzner', 'ovh', 'contabo', 'datacenter', 'dc', 'node', 'rack'];
+// 通用服务器类词（整词）
+const PTR_DC = ['vps', 'vds', 'server', 'servers', 'dedicated', 'colo', 'colocation', 'cloud', 'compute', 'ec2', 'hosting', 'datacenter'];
+// 厂商域名（子串）：这些名字足够独特，不会出现在家宽 PTR 中
+const PTR_DC_DOMAINS = ['googleusercontent', 'amazonaws', 'linode', 'vultr', 'hetzner', 'your-server.de', 'ovh.net',
+  'contabo', 'digitalocean', 'leaseweb', 'choopa', 'akamaitechnologies'];
 
 /** PTR 关键词判断：{ signal: 'residential'|'static'|'datacenter'|null, keyword } */
 export function classifyPtr(ptr) {
   if (!ptr) return { signal: null };
-  const tokens = ptr.toLowerCase().replace(/\.$/, '').split(/[.\-_\d]+/).filter(Boolean);
-  const dc = PTR_DC.find((k) => tokens.includes(k) || (k.length > 5 && ptr.toLowerCase().includes(k)));
+  const low = ptr.toLowerCase().replace(/\.$/, '');
+  const tokens = low.split(/[^a-z]+/).filter(Boolean);
+  const dc = PTR_DC.find((k) => tokens.includes(k)) || PTR_DC_DOMAINS.find((k) => low.includes(k));
   if (dc) return { signal: 'datacenter', keyword: dc };
   const st = PTR_STATIC.find((k) => tokens.includes(k));
   if (st) return { signal: 'static', keyword: st };
-  const res = PTR_RES.find((k) => tokens.includes(k) || (k.length > 5 && ptr.toLowerCase().includes(k)));
+  const res = PTR_RES.find((k) => tokens.includes(k));
   if (res) return { signal: 'residential', keyword: res };
   return { signal: null };
 }

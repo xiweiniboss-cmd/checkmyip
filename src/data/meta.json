@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-31T11:35:37.650Z",
+  "generatedAt": "2026-10-31T11:59:20.390Z",
   "sources": {
     "aws": {
       "ok": true,
@@ -84,7 +84,13 @@
     "tor": {
       "ok": true,
       "url": "https://check.torproject.org/torbulkexitlist",
-      "count": 1225
+      "count": 1224
     }
+  },
+  "index": {
+    "v4Segments": 2583,
+    "v6Segments": 3217,
+    "v6Width": 32,
+    "labels": 10
   }
 }

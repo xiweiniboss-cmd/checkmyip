@@ -5,9 +5,15 @@ export const TYPE = {
   residential: '家庭宽带', mobile: '移动网络', business: '商业宽带', edu: '教育网', datacenter: '数据中心', proxy: '代理 / Tor', unknown: '未知',
 };
 
-const CLS_TEXT = { isp: '固网运营商', mobile: '移动运营商', business: '骨干网 / 企业专线', edu: '教育科研网', hosting: '数据中心 / 云服务', vpn: 'VPN / 代理托管' };
+const CLS_TEXT = { isp: '固网运营商', mobile: '移动运营商', business: '企业专线 / 商业网络', transit: '国际骨干 / 转接网络 (transit)', edu: '教育科研网', hosting: '数据中心 / 云服务', vpn: 'VPN / 代理托管' };
 
-export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}, external = [], proxyHeaders = [] }) {
+export const INCOMPLETE_CAP = 60;
+export const NO_REPUTATION_NOTE = '未接入信誉库：代理 / VPN 使用的家宽 IP 可能仍显示高分。';
+
+/**
+ * @param quality { geoOk: 地理位置/ASN 接口是否成功, ptrOk: 反向解析是否成功（无记录也算成功） }
+ */
+export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}, external = [], proxyHeaders = [], quality = {} }) {
   const signals = [];
   const add = (key, name, effect, level, detail) => signals.push({ key, name, effect, level, detail });
   const labels = new Set();
@@ -29,6 +35,8 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
       add('asn', 'ASN 类型', asnInfo.by === 'asn' ? -55 : -45, 'bad', `${via}，属于${CLS_TEXT.hosting}（${asnInfo.name || asn.org || ''}）。`); labels.add('机房 IP'); break;
     case 'vpn':
       add('asn', 'ASN 类型', -60, 'bad', `${via}，该网络常被 VPN / 代理服务商使用（${asnInfo.name || asn.org || ''}）。`); labels.add('疑似 VPN'); labels.add('机房 IP'); break;
+    case 'transit':
+      add('asn', 'ASN 类型', asn.asn === 174 ? -20 : -15, 'warn', `${via}，属于${CLS_TEXT.transit}（${asnInfo.name || asn.org || ''}），主要提供 IP 转接与企业专线，不是家宽。${asnInfo.note || ''}`); labels.add('骨干 / 转接网络'); break;
     case 'business':
       add('asn', 'ASN 类型', -10, 'warn', `${via}，属于${CLS_TEXT.business}（${asnInfo.name || asn.org || ''}），常见于企业专线、精品线路或中转。`); labels.add('企业网络'); break;
     case 'isp':
@@ -38,7 +46,7 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
     case 'edu':
       add('asn', 'ASN 类型', 0, 'good', `${via}，属于${CLS_TEXT.edu}（${asnInfo.name || asn.org || ''}）。`); labels.add('教育网'); break;
     default:
-      add('asn', 'ASN 类型', -10, 'warn', asn.asn ? `AS${asn.asn}（${asn.org || '未知组织'}）不在内置名单中，组织名也无法判断类型。` : '未能获取 ASN 信息。');
+      add('asn', 'ASN 类型', -10, 'warn', asn.asn ? `AS${asn.asn}（${asn.org || '未知组织'}）不在内置名单中，组织名也无法判断类型。` : '未能获取 ASN 信息，无法判断网络类型。');
   }
 
   // 3. 反向解析
@@ -90,25 +98,49 @@ export function analyze({ cloud = [], asn = {}, asnInfo = {}, ptr = {}, tor = {}
   else if (asnInfo.cls === 'mobile') { type = 'mobile'; confidence = asnInfo.by === 'asn' ? 'high' : 'medium'; }
   else if (asnInfo.cls === 'edu') { type = 'edu'; confidence = asnInfo.by === 'asn' ? 'high' : 'medium'; }
   else if (asnInfo.cls === 'business') { type = 'business'; confidence = 'medium'; }
+  else if (asnInfo.cls === 'transit') { type = 'business'; confidence = ptr.signal === 'datacenter' || extDc ? 'low' : 'medium'; }
   else if (asnInfo.cls === 'isp') {
     if (ptr.signal === 'datacenter' || extDc) { type = 'business'; confidence = 'low'; }
     else if (ptr.signal === 'static') { type = 'business'; confidence = 'medium'; }
-    else { type = 'residential'; confidence = asnInfo.by === 'asn' || ptr.signal === 'residential' ? 'high' : 'medium'; }
+    // 混用 ASN（中国移动、CN2 等）无法确认是家宽，置信度最高只给「中」
+    else { type = 'residential'; confidence = asnInfo.mixed ? 'medium' : asnInfo.by === 'asn' || ptr.signal === 'residential' ? 'high' : 'medium'; }
   } else if (ptr.signal === 'datacenter' || extDc) { type = 'datacenter'; confidence = 'low'; }
   else if (ptr.signal === 'residential') { type = 'residential'; confidence = 'low'; }
   if (tor.tor && type !== 'datacenter') { type = 'proxy'; confidence = 'high'; }
   if (type === 'residential') labels.add('家庭宽带');
 
+  // ---- 数据完整性 ----
+  // 没有 ASN 就无法判断网络类型；此时绝不能给出“干净”的结论
+  const missing = [];
+  if (quality.geoOk === false) missing.push('geo');
+  if (!asn.asn) missing.push('asn');
+  if (quality.ptrOk === false || ptr.error) missing.push('ptr');
+  const incomplete = !asn.asn;
+  if (incomplete) { labels.add('数据不完整'); if (confidence === 'high' && !cloud.length && !tor.tor) confidence = 'medium'; if (type === 'unknown') confidence = 'low'; }
+  else if (missing.includes('geo')) add('data', '数据完整性', 0, 'warn', '地理位置接口全部失败，位置信息缺失（ASN 来自 Cloudflare，类型判断仍可进行）。');
+
   // ---- 评分 ----
   let score = 100 + signals.reduce((s, x) => s + x.effect, 0);
   score = Math.max(0, Math.min(100, score));
+  if (incomplete) {
+    const why = missing.includes('geo') ? '地理位置 / ASN 接口全部失败' : '接口未返回 ASN';
+    const cut = Math.min(0, INCOMPLETE_CAP - score);
+    add('data', '数据不完整', cut, 'warn', `${why}${missing.includes('ptr') ? '，反向解析也失败' : ''}，无法判断网络类型。为避免误报“干净”，分数封顶 ${INCOMPLETE_CAP}、风险至少为「中」，请稍后重试。`);
+    score += cut;
+  }
   let risk = score >= 80 ? 'low' : score >= 50 ? 'medium' : 'high';
+  if (incomplete && risk === 'low') risk = 'medium';
   if (tor.tor) risk = 'high';
+
+  // ---- 信誉库 ----
+  const repSources = external.filter((x) => x.ok).map((x) => x.source);
+  const reputation = { used: repSources.length > 0, sources: repSources, note: repSources.length ? null : NO_REPUTATION_NOTE };
 
   return {
     type, typeText: TYPE[type], confidence, confidenceText: { high: '高', medium: '中', low: '低' }[confidence],
     score, risk, riskText: { low: '低', medium: '中', high: '高' }[risk],
     labels: [...labels], signals,
+    incomplete, missing, reputation,
     note: '评分基于公开 IP 段、ASN 名单、反向解析与 Tor 列表等规则推断，仅供参考，不代表任何平台的真实风控结果。',
   };
 }

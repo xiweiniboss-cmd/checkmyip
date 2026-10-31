@@ -15,8 +15,20 @@ GEO_PROVIDERS = "ip.sb,ipwho.is,geojs,ipapi.is,ipinfo,ipapi.co"
 CACHE_TTL = "21600"
 # 每个外部请求的超时（毫秒）
 LOOKUP_TIMEOUT_MS = "3000"
-# 每个访问者每分钟最多查询其他 IP 的次数（粗略，按 isolate 计）
+# 未配置 LOOKUP_LIMITER 绑定时，进程内限流的阈值：每个访问者每分钟最多查询其他 IP 的次数（按 isolate 计，较粗略）
 LOOKUP_RATE_LIMIT = "30"
+# 允许跨域调用 /api/ip?ip= 的来源（逗号分隔，含协议，不带结尾斜杠）。留空 = 只允许同源。
+# v4./v6. 探测子域会自动允许其主域名；DEV_MODE=true 时额外允许 localhost / 127.0.0.1。
+ALLOWED_ORIGINS = ""
+
+# ---------- 可选：Cloudflare Rate Limiting 绑定（推荐，见 README「限流」）----------
+# 配置后 Worker 自动改用该绑定限流（按 Cloudflare 节点计数），未配置时退回进程内计数。
+# [[ratelimits]]
+# name = "LOOKUP_LIMITER"
+# namespace_id = "1001"        # 账号内唯一的正整数（字符串）
+#   [ratelimits.simple]
+#   limit = 30                 # 每个访问者每 period 秒最多查询次数
+#   period = 60                # 只能是 10 或 60
 
 # 可选密钥请用 secret 设置，不要写进本文件：
 #   npx wrangler secret put IPAPI_IS_KEY
@@ -25,9 +37,15 @@ LOOKUP_RATE_LIMIT = "30"
 #   npx wrangler secret put IPINFO_TOKEN
 # 本地开发可写在 .dev.vars（见 .dev.vars.example）
 
-# 绑定自定义域名示例（部署前取消注释并改成你的域名）：
+# ====================== 模板：自定义域名（默认不启用）======================
+# example.com 只是占位符。确定域名后：
+#   1. 把下面三行里的 checkmyip.example.com 全部换成你的域名，并取消注释；
+#   2. 同时修改 public/config.js 里的 SITE_DOMAIN；
+#   3. 按 README「自定义域名」一节处理 v4 / v6 子域的 DNS（v4 只留 A、v6 只留 AAAA）。
+# 保持注释状态时，部署只会得到 *.workers.dev 地址。
 # routes = [
 #   { pattern = "checkmyip.example.com", custom_domain = true },
 #   { pattern = "v4.checkmyip.example.com", custom_domain = true },
 #   { pattern = "v6.checkmyip.example.com", custom_domain = true },
 # ]
+# ===========================================================================

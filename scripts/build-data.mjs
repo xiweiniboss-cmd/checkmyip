@@ -116,6 +116,52 @@ function compact(cidrs) {
   return { v4: o4, v6: o6, bad };
 }
 
+// ---------- 运行时索引 ----------
+// 把所有厂商的区间（可能互相嵌套 / 重叠，如 goog.json 与 cloud.json）切分成**互不相交、已排序**的区间，
+// 每段记录覆盖它的厂商集合。运行时只需一次二分查找，无需排序或构建。
+const PRIORITY = ['gcp', 'aws', 'azure', 'oracle', 'cloudflare', 'fastly', 'digitalocean', 'linode', 'vultr', 'google'];
+function disjoint(byProvider) { // byProvider: { id: [[s,e] BigInt ...] }
+  const ev = new Map(); // pos -> Map(id -> delta)
+  const bump = (pos, id, d) => { let m = ev.get(pos); if (!m) ev.set(pos, (m = new Map())); m.set(id, (m.get(id) || 0) + d); };
+  for (const [id, list] of Object.entries(byProvider)) for (const [s, e] of list) { bump(s, id, 1); bump(e + 1n, id, -1); }
+  const points = [...ev.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const active = new Map(); const segs = [];
+  for (let i = 0; i < points.length; i++) {
+    for (const [id, d] of ev.get(points[i])) { const n = (active.get(id) || 0) + d; if (n) active.set(id, n); else active.delete(id); }
+    if (!active.size || i + 1 >= points.length) continue;
+    const ids = [...active.keys()].sort((a, b) => PRIORITY.indexOf(a) - PRIORITY.indexOf(b));
+    const s = points[i], e = points[i + 1] - 1n, key = ids.join('+');
+    const last = segs[segs.length - 1];
+    if (last && last.key === key && last.e + 1n === s) last.e = e; else segs.push({ s, e, key, ids });
+  }
+  return segs;
+}
+function toRanges(cidrs, bits) {
+  return cidrs.map((c) => {
+    const [a, l] = c.split('/'); const len = BigInt(l);
+    const n = bits === 32 ? BigInt(v4ToInt(a)) : v6ToBig(a);
+    const host = (1n << (BigInt(bits) - len)) - 1n; return [n, n + host];
+  });
+}
+function buildIndex(providers) {
+  const labels = [], labelIdx = new Map();
+  const lab = (seg) => { if (!labelIdx.has(seg.key)) { labelIdx.set(seg.key, labels.length); labels.push(seg.ids); } return labelIdx.get(seg.key); };
+  const v4segs = disjoint(Object.fromEntries(Object.entries(providers).map(([id, p]) => [id, toRanges(p.v4, 32)])));
+  const v6segs = disjoint(Object.fromEntries(Object.entries(providers).map(([id, p]) => [id, toRanges(p.v6, 128)])));
+  // IPv6：若所有边界都对齐到 /64，只存高 64 位（16 位十六进制），否则存完整 128 位（32 位）
+  const LOW = (1n << 64n) - 1n;
+  const aligned = v6segs.every((g) => (g.s & LOW) === 0n && (g.e & LOW) === LOW);
+  const width = aligned ? 16 : 32;
+  const hex = (n) => n.toString(16).padStart(32, '0').slice(0, width);
+  return {
+    providers: Object.fromEntries(Object.entries(providers).map(([id, p]) => [id, p.name])),
+    labels,
+    v4: { s: v4segs.map((g) => Number(g.s)), e: v4segs.map((g) => Number(g.e)), l: v4segs.map(lab) },
+    // 定宽十六进制字符串：字典序 == 数值序，运行时无需 BigInt 即可二分查找
+    v6: { width, s: v6segs.map((g) => hex(g.s)), e: v6segs.map((g) => hex(g.e)), l: v6segs.map(lab) },
+  };
+}
+
 async function readOld(file) { try { return JSON.parse(await readFile(path.join(DATA_DIR, file), 'utf8')); } catch { return null; } }
 
 async function main() {
@@ -136,6 +182,10 @@ async function main() {
     }
   }
   await writeFile(path.join(DATA_DIR, 'cloud-ranges.json'), JSON.stringify({ providers }));
+  const index = buildIndex(providers);
+  await writeFile(path.join(DATA_DIR, 'cloud-index.json'), JSON.stringify(index));
+  meta.index = { v4Segments: index.v4.s.length, v6Segments: index.v6.s.length, v6Width: index.v6.width, labels: index.labels.length };
+  console.log(`✔ index         v4 ${index.v4.s.length} 段 / v6 ${index.v6.s.length} 段（互不相交），v6 键宽 ${index.v6.width}`);
 
   // Tor 出口节点
   try {

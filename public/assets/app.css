@@ -265,3 +265,8 @@ h2 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.3px; }
 .mono-in { font-family: var(--mono); font-size: 13px; }
 .score-summary { margin: 14px 4px 0; font-size: 13.5px; line-height: 1.7; color: var(--text-2, var(--muted)); text-align: center; min-height: 1.7em; }
 .score-summary b { color: var(--text); }
+.score-alert { margin: 12px 4px 0; padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 13px; line-height: 1.6; border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+.score-alert b { color: inherit; }
+.rep-note { margin: 12px 4px 0; font-size: 12px; line-height: 1.6; color: var(--muted); text-align: center; }
+.rep-note::before { content: "ⓘ "; }
+[hidden] { display: none !important; }

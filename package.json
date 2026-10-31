@@ -1,6 +1,6 @@
 {
   "name": "checkmyip",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "checkmyip — IP 信息与纯净度检测（Cloudflare Worker + 静态资源）",
   "type": "module",
@@ -8,7 +8,11 @@
     "dev": "wrangler dev --local",
     "deploy": "wrangler deploy",
     "build:data": "node scripts/build-data.mjs",
-    "test": "node scripts/smoke-test.mjs"
+    "test": "node scripts/test-ranges.mjs && node scripts/test-rules.mjs",
+    "test:ranges": "node scripts/test-ranges.mjs",
+    "test:rules": "node scripts/test-rules.mjs",
+    "bench": "node scripts/bench-ranges.mjs",
+    "smoke": "node scripts/smoke-test.mjs"
   },
   "license": "UNLICENSED",
   "devDependencies": {

@@ -1,34 +1,31 @@
-// 云厂商公开 IP 段匹配。数据由 scripts/build-data.mjs 生成。
-import data from '../data/cloud-ranges.json';
-import { cidrRange } from './ip.js';
+// 云厂商公开 IP 段匹配。
+// 数据由 scripts/build-data.mjs 预先处理为「已排序、互不相交」的区间（src/data/cloud-index.json），
+// 运行时不做任何排序或构建：IPv4 直接对数字数组二分；IPv6 对定宽十六进制字符串二分（字典序即数值序）。
+import idx from '../data/cloud-index.json' with { type: 'json' };
 
-let index = null;
-
-function build() {
-  const v4 = [], v6 = [];
-  for (const [id, p] of Object.entries(data.providers)) {
-    for (const c of p.v4) { const r = cidrRange(c); v4.push([r.s, r.e, id]); }
-    for (const c of p.v6) { const r = cidrRange(c); v6.push([r.s, r.e, id]); }
-  }
-  const cmp = (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  v4.sort(cmp); v6.sort(cmp);
-  index = { v4, v6 };
+/** 返回最后一个 starts[i] <= x 的下标，没有则 -1 */
+function upper(starts, x) {
+  let lo = 0, hi = starts.length - 1, pos = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= x) { pos = mid; lo = mid + 1; } else hi = mid - 1; }
+  return pos;
 }
 
-// 区间可能在不同厂商间重叠（如 google 与 gcp），所以向前扫描若干条
-function search(list, n) {
-  let lo = 0, hi = list.length - 1, pos = -1;
-  while (lo <= hi) { const mid = (lo + hi) >> 1; if (list[mid][0] <= n) { pos = mid; lo = mid + 1; } else hi = mid - 1; }
-  const hits = [];
-  for (let i = pos; i >= 0 && i > pos - 64; i--) if (n <= list[i][1]) hits.push(list[i][2]);
-  return [...new Set(hits)];
+export function lookupIds(p) {
+  if (p.version === 4) {
+    const t = idx.v4, i = upper(t.s, p.v4);
+    return i >= 0 && p.v4 <= t.e[i] ? idx.labels[t.l[i]] : [];
+  }
+  // IPv6：只在查询 IPv6 时才把 BigInt 转成十六进制键，不构建任何结构
+  const t = idx.v6;
+  const key = p.v6.toString(16).padStart(32, '0').slice(0, t.width);
+  const i = upper(t.s, key);
+  return i >= 0 && key <= t.e[i] ? idx.labels[t.l[i]] : [];
 }
 
 /** 返回命中的厂商列表 [{id, name}] */
 export function matchCloud(p) {
-  if (!index) build();
-  const ids = p.version === 4 ? search(index.v4, p.v4) : search(index.v6, p.v6);
+  const ids = lookupIds(p);
   // 同时命中 google 与 gcp 时，优先展示更具体的 gcp
   const list = ids.includes('gcp') ? ids.filter((x) => x !== 'google') : ids;
-  return list.map((id) => ({ id, name: data.providers[id].name }));
+  return list.map((id) => ({ id, name: idx.providers[id] }));
 }

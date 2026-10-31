@@ -8,6 +8,8 @@ const DEFAULT = [
   ['39.96.0.1', '阿里云 (北京)'], ['119.28.0.1', '腾讯云 (HK)'], ['49.234.0.1', '腾讯云'], ['114.222.1.1', '中国电信'],
   ['180.110.1.1', '中国电信'], ['221.218.0.1', '中国联通'], ['112.224.0.1', '中国联通'], ['117.136.0.1', '中国移动'],
   ['120.204.0.1', '中国移动'], ['73.0.0.1', 'Comcast'], ['5.9.0.1', 'Hetzner'], ['2001:4860:4860::8888', 'Google v6'],
+  // 嵌套 / 重叠段（旧实现只回扫 64 段会漏检）
+  ['34.190.0.1', 'Google 34.128.0.0/10'], ['34.183.219.127', 'Google /10 内，旧版漏检'], ['34.186.0.1', 'GCP 段嵌套在 Google /10 内'],
 ];
 let list = args.length ? args.map((a) => [a, '']) : DEFAULT;
 if (!args.length) {
@@ -23,12 +25,13 @@ for (const [ip, note] of list) {
     if (!d.ok) { rows.push({ ip, note, error: d.message }); continue; }
     const a = d.analysis;
     rows.push({ ip, note, asn: d.network.asn ? `AS${d.network.asn}` : '-', org: (d.network.org || '').slice(0, 28),
-      loc: [d.location.countryCode, d.location.region].filter(Boolean).join('/'), type: a.typeText, score: a.score, risk: a.riskText,
+      loc: [d.location.countryCode, d.location.region].filter(Boolean).join('/'), type: a.typeText, conf: a.confidenceText, score: a.score, risk: a.riskText,
+      cloud: d.network.cloudProvider.join('+') || '-', inc: a.incomplete ? '是' : '否',
       signals: a.signals.filter((s) => s.effect).map((s) => `${s.name}${s.effect > 0 ? '+' : ''}${s.effect}`).join('; ') || '-',
       geo: d.sources.geo, ptr: d.network.ptr || '-', ms: Date.now() - t0 });
   } catch (e) { rows.push({ ip, note, error: String(e.message || e) }); }
 }
-console.log('| IP | 备注 | ASN | 组织 | 位置 | 类型 | 分数 | 风险 | 主要信号 | PTR | 地理来源 | ms |');
-console.log('|---|---|---|---|---|---|---|---|---|---|---|---|');
+console.log('| IP | 备注 | ASN | 组织 | 位置 | 云厂商段 | 类型 | 置信度 | 分数 | 风险 | 不完整 | 主要信号 | PTR | 地理来源 | ms |');
+console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 for (const r of rows) console.log(r.error ? `| ${r.ip} | ${r.note} | 错误：${r.error} |` :
-  `| ${r.ip} | ${r.note} | ${r.asn} | ${r.org} | ${r.loc} | ${r.type} | ${r.score} | ${r.risk} | ${r.signals} | ${r.ptr} | ${r.geo} | ${r.ms} |`);
+  `| ${r.ip} | ${r.note} | ${r.asn} | ${r.org} | ${r.loc} | ${r.cloud} | ${r.type} | ${r.conf} | ${r.score} | ${r.risk} | ${r.inc} | ${r.signals} | ${r.ptr} | ${r.geo} | ${r.ms} |`);

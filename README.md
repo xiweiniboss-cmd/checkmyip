@@ -32,7 +32,7 @@
 
 1. **访问者 IP**：线上取 `CF-Connecting-IP`，并直接使用 `request.cf` 中的国家 / 城市 / ASN / 时区。
 2. **地理与 ASN**：`request.cf` 不可用（查询他人 IP 或本地开发）时，依次尝试免费免 key 的接口：ip.sb → ipwho.is → GeoJS → ipapi.is → ipinfo → ipapi.co（顺序可由 `GEO_PROVIDERS` 配置），每个请求 3 秒超时。
-3. **云厂商 IP 段**：AWS、GCP、Google、Cloudflare、Azure、Oracle、DigitalOcean、Linode、Vultr、Fastly 的官方公开段（`src/data/cloud-ranges.json`，二分查找）。
+3. **云厂商 IP 段**：AWS、GCP、Google、Cloudflare、Azure、Oracle、DigitalOcean、Linode、Vultr、Fastly 的官方公开段（构建时预处理为互不相交区间 `src/data/cloud-index.json`，运行时一次二分查找）。
 4. **ASN 名单**：`src/lib/asn.js` 内置国内外常见运营商、移动网络、教育网、云厂商 / 机房、VPN 厂商的 ASN，以及按名称关键词兜底。
 5. **反向解析（PTR）**：通过 DoH（cloudflare-dns.com，失败回退 dns.google）查询，按关键词识别机房 / 静态 / 家宽。
 6. **Tor 出口**：在线拉取 Tor Project 出口列表（缓存 1 小时），失败时使用内置列表。
@@ -47,9 +47,9 @@
 
 ```
 wrangler.toml            Worker 与静态资源配置
-src/worker.js            路由、访问者 IP 识别、查询编排、缓存、限流
+src/worker.js            路由、访问者 IP 识别、查询编排、缓存、CORS 白名单、限流、v4/v6 探测子域
 src/lib/ip.js            IPv4/IPv6 解析、保留地址判断、PTR 名称
-src/lib/ranges.js        云厂商 IP 段匹配
+src/lib/ranges.js        云厂商 IP 段匹配（读取预计算索引，单次二分）
 src/lib/asn.js           ASN 名单与关键词分类、PTR 关键词
 src/lib/geo.js           免费地理接口适配与合并
 src/lib/ptr.js           DoH 反向解析
@@ -60,6 +60,9 @@ src/lib/http.js          带超时的 fetch 工具
 src/data/*.json          由脚本生成的 IP 段 / Tor 列表 / 元数据（已提交）
 scripts/build-data.mjs   下载并合并公开 IP 段数据
 scripts/smoke-test.mjs   本地冒烟测试，输出 Markdown 表格
+scripts/test-ranges.mjs  IP 段匹配测试（与原始 CIDR 暴力比对）
+scripts/test-rules.mjs   ASN / PTR / 评分规则测试
+scripts/bench-ranges.mjs 冷启动 CPU 时间测量
 public/                  前端页面（index.html、assets/、config.js）
 ```
 
@@ -74,12 +77,25 @@ npx wrangler dev                   # 或 npm run dev（--local 模式）
 # 打开 http://127.0.0.1:8787
 ```
 
-本地没有 `CF-Connecting-IP`，Worker 会在 `DEV_MODE=true` 时依次使用 `DEV_IP` → ip.sb → ipify 获取本机出口 IP 作为“访问者 IP”。
+本地没有 `CF-Connecting-IP`，Worker 会在 `DEV_MODE=true` 时依次使用 `DEV_IP` → ip.sb → ipify 获取本机出口 IP 作为“访问者 IP”（仅本地开发使用，线上直接读 `CF-Connecting-IP`）。
+
+模拟所有外部查询失败（检查「数据不完整」状态，仅 `DEV_MODE=true` 时生效）：
+
+```bash
+npx wrangler dev --local --var DEV_SIMULATE_FAIL:true
+```
+
+单元测试与性能（不需要启动 dev）：
+
+```bash
+npm test               # IP 段匹配（与原始 CIDR 暴力比对，约 21 万次检查）+ ASN / PTR / 评分规则
+npm run bench          # 冷启动 CPU：每次新开 node 进程导入并做第一次查询
+```
 
 冒烟测试（需先启动 dev）：
 
 ```bash
-npm test                                   # 默认测试一组 IP
+npm run smoke                                         # 默认测试一组 IP
 node scripts/smoke-test.mjs http://127.0.0.1:8787 8.8.8.8 114.222.1.1
 ```
 
@@ -92,17 +108,58 @@ npx wrangler deploy
 
 ### 绑定自定义域名
 
-在 `wrangler.toml` 中取消注释并修改 `routes`：
+`wrangler.toml` 中的 `routes` 是**模板**，默认注释，`checkmyip.example.com` 只是占位符。域名必须已托管在 Cloudflare（NS 指向 Cloudflare）。以下用 `ip.mydomain.com` 举例：
 
-```toml
-routes = [
-  { pattern = "checkmyip.example.com", custom_domain = true },
-  { pattern = "v4.checkmyip.example.com", custom_domain = true },  # 可选：仅 A 记录
-  { pattern = "v6.checkmyip.example.com", custom_domain = true },  # 可选：仅 AAAA 记录
-]
-```
+1. **主站**：在 `wrangler.toml` 取消注释 `routes`，把三处 `checkmyip.example.com` 换成 `ip.mydomain.com`：
+   ```toml
+   routes = [
+     { pattern = "ip.mydomain.com", custom_domain = true },
+     { pattern = "v4.ip.mydomain.com", custom_domain = true },
+     { pattern = "v6.ip.mydomain.com", custom_domain = true },
+   ]
+   ```
+2. **部署**：`npx wrangler deploy`。`custom_domain = true` 会让 Cloudflare 自动为这三个主机名创建 DNS 记录和证书。
+3. **v4 / v6 子域只保留单栈**：在 Cloudflare 控制台 → 该域名 → DNS → 记录 中检查：
+   - `v4.ip.mydomain.com`：只保留 **A** 记录，删除 AAAA 记录；
+   - `v6.ip.mydomain.com`：只保留 **AAAA** 记录，删除 A 记录。
 
-域名需托管在 Cloudflare。若要用自己的域名做 IPv4 / IPv6 分别检测，可让 `v4.` 子域只有 A 记录、`v6.` 子域只有 AAAA 记录，再把 `public/config.js` 中的 `ipv4` / `ipv6` 地址改为 `https://v4.你的域名/api/ip`、`https://v6.你的域名/api/ip`（前端已兼容 `{ip: ...}` JSON 返回）。
+   这样浏览器访问 `v4.` 时只能走 IPv4、访问 `v6.` 时只能走 IPv6。Worker 对 `v4.*` / `v6.*` 主机名只提供极简接口 `GET /api/ip` → `{"ok":true,"ip":"…","version":4}`，并自动允许主域名跨域调用。
+   如果控制台不允许修改 Custom Domain 自动生成的记录，可改为：先手动创建 `v4`（仅 A，值随便填如 `192.0.2.1`，开启代理/橙色云）和 `v6`（仅 AAAA，如 `100::`，开启代理），再把这两条改用 `routes = [{ pattern = "v4.ip.mydomain.com/*", zone_name = "mydomain.com" }, …]` 的普通路由方式绑定。
+4. **前端**：编辑 `public/config.js`，把 `SITE_DOMAIN` 设为 `'ip.mydomain.com'`，前端就会改用 `https://v4.ip.mydomain.com/api/ip` 与 `https://v6.ip.mydomain.com/api/ip`。`SITE_DOMAIN` 为空（或仍是 example.com）时退回 ip.sb 的公共接口。
+5. **验证**：`curl -4 https://v4.ip.mydomain.com/api/ip`、`curl -6 https://v6.ip.mydomain.com/api/ip`，以及 `curl -6 https://v4.ip.mydomain.com/api/ip` 应当失败（无 AAAA）。
+6. 如果主站与探测子域不是“`v4.` + 主站域名”的关系（例如主站是 `www.mydomain.com`），把主站来源加入 `ALLOWED_ORIGINS`。
+
+### 跨域（CORS）
+
+`/api/*` 默认只允许同源调用。需要让别的网站调用时，在 `wrangler.toml` 的 `ALLOWED_ORIGINS` 写入来源（逗号分隔，含协议），例如 `"https://a.com,https://b.com"`。
+不在白名单的跨域来源请求 `/api/ip?ip=…` 会得到 `403 origin_not_allowed`；查询自身 IP（无 `?ip=`）不返回 CORS 头，浏览器会拒绝跨域读取。
+注意：CORS 只能阻止**别的网站借访客浏览器**调用接口，curl 等非浏览器客户端可以伪造或省略 `Origin`，所以仍需要限流。
+
+### 限流
+
+Worker 优先使用 Cloudflare 的 **Rate Limiting 绑定**（Workers Rate Limiting API，需 wrangler ≥ 4.36）：
+
+1. 在 `wrangler.toml` 取消注释这一段（`namespace_id` 是你账号内唯一的正整数，写成字符串）：
+   ```toml
+   [[ratelimits]]
+   name = "LOOKUP_LIMITER"
+   namespace_id = "1001"
+     [ratelimits.simple]
+     limit = 30
+     period = 60      # 只能是 10 或 60
+   ```
+   旧版 wrangler 使用的等价写法是 `[[unsafe.bindings]]`：
+   ```toml
+   [[unsafe.bindings]]
+   name = "LOOKUP_LIMITER"
+   type = "ratelimit"
+   namespace_id = "1001"
+   simple = { limit = 30, period = 60 }
+   ```
+2. 重新部署。代码中检测到 `env.LOOKUP_LIMITER` 时以 `lookup:<访问者 IP>` 为键调用 `limit()`，超限返回 429；响应头 `x-ratelimit-via: binding` 表示使用了绑定。
+3. 未配置绑定时退回进程内计数（`x-ratelimit-via: memory`，阈值为 `LOOKUP_RATE_LIMIT`），每个 isolate 独立，只是兜底。
+
+绑定的计数按 Cloudflare 节点分别统计、为近似值；需要全局严格限流请改用 Durable Objects 或在控制台配置 WAF Rate Limiting 规则。
 
 ## 更新 IP 段数据
 
@@ -110,7 +167,7 @@ routes = [
 npm run build:data     # 即 node scripts/build-data.mjs
 ```
 
-脚本会下载各云厂商公开 IP 段和 Tor 出口列表，合并为最小 CIDR 后写入 `src/data/`。某个来源失败时保留旧数据，并在 `src/data/meta.json` 中记录每个来源的状态。建议每周运行一次后提交并重新部署。
+脚本会下载各云厂商公开 IP 段和 Tor 出口列表，合并为最小 CIDR 后写入 `src/data/cloud-ranges.json`（便于人工查看与测试），并生成运行时索引 `src/data/cloud-index.json`：把所有厂商（含互相嵌套的 Google / GCP 段）切分成**已排序、互不相交**的区间，每段记录覆盖它的厂商集合；IPv4 存数字，IPv6 存定宽十六进制字符串（字典序即数值序）。Worker 运行时不做任何排序或构建，一次二分查找即可，IPv6 只在查询 IPv6 时才转换键值。某个来源失败时保留旧数据，并在 `src/data/meta.json` 中记录每个来源的状态。建议每周运行一次后提交并重新部署。
 
 ## 环境变量
 
@@ -119,7 +176,10 @@ npm run build:data     # 即 node scripts/build-data.mjs
 | `GEO_PROVIDERS` | var | `ip.sb,ipwho.is,geojs,ipapi.is,ipinfo,ipapi.co` | 地理接口尝试顺序（另支持 `ip-api`，仅 HTTP） |
 | `CACHE_TTL` | var | `21600` | 查询结果缓存秒数 |
 | `LOOKUP_TIMEOUT_MS` | var | `3000` | 单个外部请求超时 |
-| `LOOKUP_RATE_LIMIT` | var | `30` | 每个 isolate 每分钟允许的查询次数 |
+| `LOOKUP_RATE_LIMIT` | var | `30` | 未配置限流绑定时，每个 isolate 每分钟允许的查询次数 |
+| `ALLOWED_ORIGINS` | var | 空（仅同源） | 允许跨域调用的来源，逗号分隔 |
+| `LOOKUP_LIMITER` | ratelimit 绑定 | 未配置 | 可选，Cloudflare Rate Limiting 绑定，见「限流」 |
+| `DEV_SIMULATE_FAIL` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：模拟所有外部查询失败 |
 | `DEV_MODE` | var | 未设置 | `true` 时忽略 `request.cf`，用于本地开发 |
 | `DEV_IP` | var | 未设置 | 本地开发时模拟的访问者 IP |
 | `IPAPI_IS_KEY` | secret | — | 可选，ipapi.is |
@@ -135,7 +195,9 @@ npm run build:data     # 即 node scripts/build-data.mjs
 - 阿里云、腾讯云、华为云等国内云厂商没有公开的 IP 段文件，只能依靠 ASN 名单识别。
 - 1.1.1.1 等 Cloudflare 自有服务地址不在其公布的代理段中，仅通过 ASN 识别为数据中心。
 - 中国移动等运营商同一 ASN 同时承载家庭宽带和 4G/5G，无法精确区分，页面会给出提示。
-- 限流为 isolate 内存级别，不是全局限流；生产环境建议配合 Cloudflare 的 Rate Limiting 规则。
+- 未配置 `LOOKUP_LIMITER` 绑定时，限流只是 isolate 内存级别；配置绑定后也是按节点的近似计数。
+- 默认未接入任何信誉库（IP 黑名单 / 代理库）。使用代理或 VPN 的家宽 IP 仍可能得到高分，页面与 API（`analysis.reputation`）会明确提示；配置 `IPAPI_IS_KEY` / `PROXYCHECK_KEY` / `ABUSEIPDB_KEY` 后才会参考外部信誉数据。
+- 当地理 / ASN 接口全部失败时，结果标记为「数据不完整」（`analysis.incomplete = true`），分数封顶 60、风险至少为「中」，不会误报为“干净”。
 - DNS 泄露检测尚未实现（第二期）。
 
 ## 数据来源
