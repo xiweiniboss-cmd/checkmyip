@@ -103,7 +103,7 @@ PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）以**整词**匹配为主，�
 
 **前端补充证据**（`public/assets/app.js` 的 `cgnatEvidence()`）：WebRTC 收集到 `100.64.0.0/10`（RFC 6598 共享地址）候选，或 WebRTC 看到的公网 IPv4 与 HTTP / IPv4 探测地址不一致时，卡片会显示“发现 CGNAT 迹象”；没发现也不代表没有 NAT。
 
-### 本站观测（D1，可选）
+### 本站观测（D1，线上已启用）
 
 在配置了 D1 和盐后，页面会把**浏览器指纹哈希**上报到 `POST /api/seen`，Worker 统计“最近 30 天 / 7 天有多少个不同的浏览器指纹从你这个 IP 访问过本站”。
 
@@ -117,11 +117,11 @@ PTR 规则（`src/lib/asn.js` 的 `classifyPtr`）以**整词**匹配为主，�
 - **谁能看到**：只对“查询自己 IP”展示；`/api/ip?ip=其他IP` 永远不返回观测数（`observed.shown = false`）。
 - **调用限制**：`/api/seen` 只接受同源 `POST`（`Origin` 必须与本站一致，`Sec-Fetch-Site` 若存在须为 `same-origin`，`content-type: application/json`，请求体 ≤ 512 字节），并有独立的严格限流（IPv6 按 /64 计）。
 - **含义**：这是“本站见过的不同浏览器数”，不是这个 IP 的真实用户数。同一人换浏览器、清理数据会多算；没访问过本站的人不会被算进去。
-- **默认关闭**：`wrangler.toml` 里的 `[[d1_databases]]` 默认是注释掉的。没有 D1 绑定、表不存在或没有设置盐（少于 16 个字符视为未设置）时，页面显示「本站统计未启用」（表缺失 / 查询出错时为「本站统计暂时不可用」，`error: "db_error"`），其余功能照常，不会写入任何东西，也不会用未加盐的哈希。
+- **线上已启用**：`wrangler.toml` 的 `[[d1_databases]]` 已打开，绑定 `DB` → D1 数据库 `checkmyip`（迁移 `0001` / `0002` 已应用，`IP_HASH_SALT` 已用 secret 设置）。自己 fork 部署时换成自己的 `database_id`，或把这段注释掉以关闭观测。没有 D1 绑定、表不存在或没有设置盐（少于 16 个字符视为未设置）时，页面显示「本站统计未启用」（表缺失 / 查询出错时为「本站统计暂时不可用」，`error: "db_error"`），其余功能照常，不会写入任何东西，也不会用未加盐的哈希。
 
 启用步骤见「部署到 Cloudflare」。更换盐会让旧数据无法再与新访问对应（相当于重新计数）。
 
-本地测试（不用改 `wrangler.toml`）：
+本地测试（用 `wrangler.local-d1.toml`，全 0 的本地 ID，不碰线上库）：
 
 ```bash
 npm run db:migrate:local    # 生成 wrangler.local-d1.toml（已 gitignore，D1 段已启用、本地用全 0 ID），再对本地库执行迁移
@@ -170,7 +170,7 @@ public/                  前端页面（index.html、assets/、config.js）
 ```bash
 npm install
 cp .dev.vars.example .dev.vars     # 本地开发变量：DEV_IP（模拟访问者）、RATE_LIMIT_MULTIPLIER 等
-npm run dev                        # 盖资源版本号后 wrangler dev --local（不绑定 D1）；带 D1 用 npm run dev:d1
+npm run dev                        # 盖资源版本号后 wrangler dev --local（D1 用本地模拟库，未迁移时「本站观测」显示暂时不可用）；带已迁移的本地 D1 用 npm run dev:d1
 # 打开 http://127.0.0.1:8787
 ```
 
@@ -202,17 +202,19 @@ node scripts/smoke-test.mjs http://127.0.0.1:8787 8.8.8.8 114.222.1.1
 
 ```bash
 npx wrangler login
-npm run deploy                       # 先盖资源版本号再 wrangler deploy；默认不绑定 D1，可直接部署
+npm run deploy                       # 先盖资源版本号再 wrangler deploy（会带上 wrangler.toml 里的 D1 绑定）
 ```
+
+线上通过 Workers Builds 从 GitHub `main` 自动部署，部署以 `wrangler.toml` 为准：D1 段必须保持启用，否则下一次部署会把线上的 `DB` 绑定去掉（secret 不受影响）。
 
 `wrangler.toml` 不含任何占位 `database_id`（旧版的全 0 UUID 会让 `wrangler deploy` 报错 10021）。也没有依赖 wrangler 的 D1 自动创建：在 TOML 配置下它不会把创建出的 ID 写回文件，之后 `wrangler d1 migrations apply --remote` 找不到 `database_id` 而失败。
 
-**启用「本站观测」（可选）**：
+**启用「本站观测」**（本站线上已按以下步骤启用，数据库 `checkmyip`；自己 fork 部署时第 2 步换成自己的 ID）：
 
 ```bash
 npx wrangler d1 create checkmyip                       # 1. 记下输出里的 database_id
 #                                                        2. 编辑 wrangler.toml：把「# >>> D1 BEGIN」与「# <<< D1 END」之间
-#                                                           5 行开头的 "# " 去掉，database_id 换成第 1 步的 ID
+#                                                           [[d1_databases]] 的 database_id 换成第 1 步的 ID
 npm run db:migrate:remote                              # 3. 即 wrangler d1 migrations apply checkmyip --remote
 #                                                        （从 v0.3.1 升级：也要重跑这一步，应用新增的 0002_seen_daily.sql；
 #                                                         未应用时「本站观测」会显示暂时不可用，IP 检测不受影响）
@@ -312,7 +314,7 @@ npm run build:data     # 即 node scripts/build-data.mjs
 | `RATE_LIMIT_MULTIPLIER` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：本地放宽限流 ×N（最多 1000）并改用进程内计数 |
 | `ALLOWED_ORIGINS` | var | 空（仅同源） | 允许跨域调用的来源，逗号分隔 |
 | `SELF_LIMITER` / `LOOKUP_LIMITER` / `SEEN_LIMITER` | ratelimit 绑定 | 已启用 | 见「限流」 |
-| `DB` | D1 绑定 | 默认注释掉（不启用） | 本站观测；启用步骤见「部署到 Cloudflare」 |
+| `DB` | D1 绑定 | 已启用（数据库 `checkmyip`） | 本站观测；启用步骤见「部署到 Cloudflare」 |
 | `IP_HASH_SALT` | secret | — | 本站观测的 HMAC 盐，至少 16 个字符；未设置时观测功能关闭 |
 | `DEV_SIMULATE_FAIL` | var | 未设置 | 仅 `DEV_MODE=true` 时有效：模拟所有外部查询失败 |
 | `DEV_MODE` | var | 未设置 | `true` 时忽略 `request.cf`，用于本地开发 |

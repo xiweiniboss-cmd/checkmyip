@@ -53,23 +53,21 @@ namespace_id = "1003"
   limit = 10
   period = 60
 
-# ---------- D1：「本站观测到的设备数」（可选，默认关闭；见 README「部署」与「本站观测」）----------
-# 默认不绑定 D1：页面显示「本站统计未启用」，其余功能不受影响，`wrangler deploy` 可以直接成功。
-# 不再放占位 database_id（全 0 的 UUID 会让真实部署报错 10021）；也不依赖 wrangler 的 D1 自动创建
-# （TOML 配置下 wrangler 不会把创建出的 ID 写回本文件，之后 `d1 migrations apply --remote` 会因缺少 database_id 失败）。
-# 启用步骤：
-#   1. npx wrangler d1 create checkmyip                    → 记下输出里的 database_id
-#   2. 把下面 D1 BEGIN / END 之间 5 行行首的 "# " 去掉，并把 database_id 换成第 1 步的 ID
-#   3. npx wrangler d1 migrations apply checkmyip --remote  （即 npm run db:migrate:remote）
-#   4. npx wrangler secret put IP_HASH_SALT                 （≥16 字符随机串，如 openssl rand -hex 32）
-#   5. npm run deploy
-# 本地试用不必改本文件：npm run db:migrate:local && npm run dev:d1（会生成已被 gitignore 的 wrangler.local-d1.toml）
+# ---------- D1：「本站观测到的设备数」（线上已启用；见 README「部署」与「本站观测」）----------
+# 线上 checkmyip 已绑定 D1 数据库 checkmyip（下面的 database_id），迁移 0001 / 0002 已应用，IP_HASH_SALT 已用 secret 设置。
+# 这一段必须保持启用：`wrangler deploy`（含 Workers Builds 自动部署）以本文件为准，删掉或注释掉会把线上的 DB 绑定去掉。
+# 自己 fork 部署时：把 database_id 换成自己的（npx wrangler d1 create checkmyip），
+#   再 npx wrangler d1 migrations apply checkmyip --remote（即 npm run db:migrate:remote），
+#   npx wrangler secret put IP_HASH_SALT（≥16 字符随机串，如 openssl rand -hex 32），最后 npm run deploy。
+#   不想启用观测：把 D1 BEGIN / END 之间的行在行首加 "# " 注释掉即可，页面显示「本站统计未启用」，其余功能不受影响。
+# 不要放占位 database_id（全 0 的 UUID 会让真实部署报错 10021）。
+# 本地：npm run db:migrate:local && npm run dev:d1（生成已被 gitignore 的 wrangler.local-d1.toml，用全 0 的本地 ID，不碰线上库）
 # >>> D1 BEGIN
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "checkmyip"
-# database_id = "<wrangler d1 create 输出的 ID>"
-# migrations_dir = "migrations"
+[[d1_databases]]
+binding = "DB"
+database_name = "checkmyip"
+database_id = "54e223f0-235d-46f8-a367-738112ed23ad"
+migrations_dir = "migrations"
 # <<< D1 END
 
 # 每天 19:17 UTC（北京时间 03:17）删除 30 天前的观测记录；写入时也会惰性清理
