@@ -318,12 +318,9 @@ h2 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.3px; }
 .exit-list .badge { flex: none; }
 .note-box { margin-top: 16px; padding: 14px 16px; border-radius: 12px; border: 1px dashed var(--border-2); font-size: 13px; color: var(--text-2); }
 .note-box p { margin: 0; } .note-box p + p { margin-top: 8px; }
-.regions summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
-.regions summary::-webkit-details-marker { display: none; }
-.regions summary::after { content: "展开 ▾"; margin-left: auto; font-size: 12.5px; color: var(--primary); }
-.regions[open] summary::after { content: "收起 ▴"; }
-.region-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.region-list small { opacity: .7; font-family: var(--mono); }
+.region-link { margin-top: 10px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.region-link a { font-weight: 600; color: var(--primary); text-decoration: none; }
+.region-link a:hover { text-decoration: underline; }
 @media (max-width: 640px) {
   .nav { display: flex; margin-left: auto; }
   .nav a:not(.nav-claude) { display: none; }
