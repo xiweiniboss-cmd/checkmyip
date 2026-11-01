@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="checkmyip-asset-version" content="a0c2fa37a6">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Claude 环境检测 · checkmyip</title>
+  <meta name="description" content="检测访问 Claude 时的出口 IP、分流是否生效、出口地区是否在 Anthropic 支持列表、IP 类型与 WebRTC 泄露，并估算浏览器的中文用户特征。浏览器环境只在本地检测。">
+  <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/app.css?v=a0c2fa37a6">
+  <script src="/assets/theme-init.js?v=a0c2fa37a6"></script>
+</head>
+<body class="page-claude">
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/" aria-label="checkmyip 首页">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg>
+        <span class="brand-name">check<b>my</b>ip</span>
+      </a>
+      <nav class="nav" aria-label="页面导航">
+        <a href="/#ip">IP 信息</a>
+        <a href="/#webrtc">WebRTC</a>
+        <a href="/#fingerprint">浏览器指纹</a>
+        <a href="/#dns">DNS 泄露</a>
+        <a href="/claude/" class="nav-claude active" aria-current="page">Claude 检测</a>
+      </nav>
+      <button class="icon-btn" id="themeBtn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
+        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg?v=a0c2fa37a6#sun"/></svg>
+        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg?v=a0c2fa37a6#moon"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="section" id="claude">
+      <div class="section-head">
+        <div>
+          <h1>Claude 环境检测</h1>
+          <p class="sub">看看访问 Claude 时实际用的是哪个出口、分流有没有生效、出口地区是否受支持，以及浏览器暴露了多少「中国用户」特征。</p>
+        </div>
+        <button class="btn primary" id="rerunBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=a0c2fa37a6#refresh"/></svg>重新检测</button>
+      </div>
+
+      <div class="privacy-box" role="note">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#ok"/></svg>
+        <div><b>浏览器环境只在本地检测。</b>
+          本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 <code>/api/ip</code>（以及本站用的归属地接口，如 ip.sb、ipwho.is 和 DNS 反查）查询类型与纯净度，
+          不写入数据库、不写日志，查询结果仅按 IP 在 Cloudflare 边缘短时缓存（最多 6 小时）；
+          为了检测，浏览器会访问 <code>claude.ai</code>、<code>1.1.1.1</code>、<code>my.ip.cn</code> 和 STUN 服务器（<code>stun.cloudflare.com</code>、<code>stun.miwifi.com</code>）。
+          页面加载时也会像首页一样查询你访问本站用的 IP：只读取「本站观测」计数，本页不上报指纹、不写入 D1。</div>
+      </div>
+
+      <div class="verdict loading" id="cvVerdict">
+        <div class="verdict-ico"></div>
+        <div><b id="cvVerdictTitle">检测中…</b><p id="cvVerdictText">正在获取各条线路的出口 IP。</p></div>
+      </div>
+
+      <!-- ============ 上：出口 IP 分流 + 风险分 ============ -->
+      <h2 class="block-title">① 出口 IP 与分流</h2>
+      <div class="grid grid-main">
+        <article class="card">
+          <div class="card-head"><span class="eyebrow">各条线路的出口</span><span class="hint-tag">浏览器直连获取</span></div>
+          <ul class="exit-list" id="exitList">
+            <li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li>
+          </ul>
+          <p class="note">「Claude 出口」来自 claude.ai 自身 Cloudflare 的 trace，最接近 Claude 实际看到的你；国内出口来自 my.ip.cn。Claude 出口与国内出口不同，说明分流生效。</p>
+        </article>
+        <article class="card score-card" id="netCard">
+          <div class="card-head"><span class="eyebrow">Claude 网络评分</span><span class="hint-tag" title="基于规则的估计，不是 Anthropic 的风控结果">规则估计</span></div>
+          <div class="gauge">
+            <svg viewBox="0 -8 200 140" aria-hidden="true">
+              <path class="gauge-track" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100"/>
+              <path class="gauge-bar" id="netBar" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100" stroke-dasharray="0 100"/>
+            </svg>
+            <div class="gauge-center"><div class="gauge-num" id="netNum">--</div><div class="gauge-label" id="netLabel">检测中</div></div>
+          </div>
+          <div class="score-meta">
+            <div><span>出口地区</span><b id="netRegion">—</b></div>
+            <div><span>IP 类型</span><b id="netType">—</b></div>
+            <div><span>延迟</span><b id="netLatency">—</b></div>
+          </div>
+        </article>
+      </div>
+      <article class="card mt">
+        <div class="card-head"><span class="eyebrow">逐项说明</span><span class="hint-tag">满分 100，按项扣分</span></div>
+        <ul class="signals" id="netItems"><li class="skel-row"></li><li class="skel-row"></li><li class="skel-row"></li></ul>
+        <p class="note">分数是根据公开信息总结的启发式规则：地区不受支持直接封顶 10 分；机房 / 代理 IP、WARP、时区不一致、WebRTC 泄露会扣分。Anthropic 的真实风控规则不公开，结果仅供参考。</p>
+      </article>
+
+      <!-- ============ 下：浏览器环境分 ============ -->
+      <h2 class="block-title">② 浏览器环境（中文用户特征）</h2>
+      <div class="grid grid-main">
+        <article class="card">
+          <div class="card-head"><span class="eyebrow">特征明细</span><span class="hint-tag">估计值</span></div>
+          <ul class="signals" id="brItems"><li class="skel-row"></li><li class="skel-row"></li></ul>
+        </article>
+        <article class="card score-card" id="brCard">
+          <div class="card-head"><span class="eyebrow">中文用户特征分</span><span class="hint-tag" title="越高越像中国大陆用户">越高越像</span></div>
+          <div class="gauge">
+            <svg viewBox="0 -8 200 140" aria-hidden="true">
+              <path class="gauge-track" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100"/>
+              <path class="gauge-bar" id="brBar" d="M 30 120 A 80 80 0 1 1 170 120" pathLength="100" stroke-dasharray="0 100"/>
+            </svg>
+            <div class="gauge-center"><div class="gauge-num" id="brNum">--</div><div class="gauge-label" id="brLabel">检测中</div></div>
+          </div>
+          <p class="score-summary">权重：时区 35 · 语言 30 · 区域格式 15 · UTC+8 偏移 10 · 中文字体 10</p>
+        </article>
+      </div>
+      <div class="note-box">
+        <p><b>这一项怎么看？</b>网页可以读到你的时区、语言和已安装字体，这些都不是 IP 能掩盖的。分数越高，说明浏览器越像在中国大陆使用。
+          它只是「可被读取的特征」，目前没有公开证据表明 claude.ai 会仅凭这些封号。</p>
+        <p><b>关于 Claude Code：</b>有说法称 Claude Code 在设置了第三方 <code>ANTHROPIC_BASE_URL</code> 时会把本机时区等信息编码进提示词，<span class="badge warn">未经证实</span>，本站没有验证过，这里的分数只是估计。</p>
+        <p><b>为什么中文字体权重很低：</b>macOS 自带苹方（PingFang SC），Windows 自带微软雅黑，很多 Linux 发行版和安卓自带 Noto CJK，海外用户也会命中，误报率很高。</p>
+      </div>
+
+      <!-- ============ 支持地区 ============ -->
+      <details class="card mt regions" id="regions">
+        <summary><span class="eyebrow">Anthropic 官方支持的国家 / 地区（<span id="regionCount">185</span> 个）</span></summary>
+        <p class="note">来源：<a href="https://www.anthropic.com/supported-countries" target="_blank" rel="noopener noreferrer">anthropic.com/supported-countries</a>，2026-11-01（北京时间）抓取，页面标注 2026-11-12 生效。
+          列出国家的属地同样支持；乌克兰不含克里米亚、顿涅茨克、赫尔松、卢甘斯克、扎波罗热。<b>中国大陆、香港、澳门、俄罗斯、白俄罗斯、伊朗、朝鲜、叙利亚、古巴、委内瑞拉等未列出，即不支持。</b>
+          此外，总部位于不支持地区、或由不支持地区的个人 / 实体控股的公司也不在服务范围内。列表可能变化，以官网为准。</p>
+        <div class="region-list" id="regionList"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div>
+        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
+        <p class="muted small">免责声明：本页结果由公开数据和启发式规则推断得出，不代表 Anthropic 的判断，也不构成任何平台风控结论。请遵守 Anthropic 的使用条款与所在地法律。</p>
+      </div>
+      <p class="muted small"><a href="/">返回首页</a></p>
+    </div>
+  </footer>
+
+  <script src="/config.js?v=a0c2fa37a6"></script>
+  <script src="/assets/webrtc.js?v=a0c2fa37a6"></script>
+  <script src="/assets/claude-rules.js?v=a0c2fa37a6"></script>
+  <script src="/assets/claude.js?v=a0c2fa37a6"></script>
+</body>
+</html>

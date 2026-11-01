@@ -20,6 +20,7 @@
 | WebRTC 泄露检测 | 通过 `stun.cloudflare.com:3478`、`stun.miwifi.com:3478` 收集候选地址并对比 |
 | 浏览器指纹概览 | UA、屏幕、时区、语言、Canvas、WebGL、字体等，全部在本地计算，不上传 |
 | DNS 泄露检测 | 占位，第二期上线（需要自有权威 DNS） |
+| Claude 环境检测（`/claude/`，v0.4.0） | 浏览器直接请求 `claude.ai` / `1.1.1.1` 的 `/cdn-cgi/trace` 与 `my.ip.cn`，对比 Claude 出口、海外出口、国内出口，判断分流是否生效；按 Anthropic 官方支持地区列表（2026-11-01 抓取）判断出口地区；复用 `/api/ip?ip=` 查询 Claude 出口的网络类型；WebRTC 泄露、时区一致性、claude.ai 延迟；另给出浏览器「中文用户特征」估计分（时区 / 语言 / 区域格式 / UTC+8 / 中文字体，字体低权重）。浏览器环境只在本地检测；本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 `/api/ip?ip=`（以及本站用的归属地接口与 DNS 反查）查询类型与纯净度，不写 D1、不写日志，结果仅按 IP 在边缘短时缓存（≤6 小时）；本页不调用 `/api/seen`；为了检测，浏览器会访问 claude.ai、1.1.1.1、my.ip.cn 和 `config.js` 里的 STUN 服务器 |
 
 ## 架构
 
@@ -157,10 +158,13 @@ scripts/test-rules.mjs   ASN / PTR / 评分规则测试
 scripts/test-sharing.mjs 共用人数估算规则测试
 scripts/test-seen.mjs    D1 观测计数测试（node:sqlite 模拟 D1，执行真实迁移）
 scripts/stress-seen-d1.mjs 本地 D1 并发压测（1000 并发 / 全站上限 50，检查写入行数不超上限）
-scripts/stamp-assets.mjs 给 index.html 中的静态资源加 ?v=<内容哈希>
+scripts/stamp-assets.mjs 给 index.html、claude/index.html 中的静态资源加 ?v=<内容哈希>
+scripts/test-claude.mjs  Claude 环境检测评分规则测试
 migrations/              D1 表结构
 scripts/bench-ranges.mjs 冷启动 CPU 时间测量
-public/                  前端页面（index.html、assets/、config.js）
+public/                  前端页面（index.html、claude/index.html、assets/、config.js）
+public/assets/claude-rules.js  Claude 检测纯规则（支持地区列表、网络评分、中文特征分；浏览器与测试共用）
+public/assets/claude.js        Claude 检测页面逻辑
 ```
 
 ## 本地运行
@@ -187,7 +191,7 @@ npx wrangler dev --local --var DEV_SIMULATE_FAIL:true
 单元测试与性能（不需要启动 dev）：
 
 ```bash
-npm test               # IP 段匹配（约 21 万次检查）+ ASN / PTR / 评分规则 + 共用人数估算 + D1 计数与每日上限 + 限流键（IPv6 /64）+ 资源版本号检查
+npm test               # IP 段匹配（约 21 万次检查）+ ASN / PTR / 评分规则 + 共用人数估算 + D1 计数与每日上限 + 限流键（IPv6 /64）+ Claude 环境评分规则 + 资源版本号检查
 npm run bench          # 冷启动 CPU：每次新开 node 进程导入并做第一次查询
 ```
 
@@ -229,7 +233,7 @@ npm run deploy                                         # 5.
 `public/_headers` 让 `/assets/*` 长期缓存（`max-age=31536000, immutable`），`index.html` 中引用的 CSS / JS / `config.js` 都带 `?v=<内容哈希前 10 位>`，图标 `icons.svg` 的版本号由 `app.js` 从 `<meta name="checkmyip-asset-version">` 读取。**修改 `public/assets/*` 或 `public/config.js` 后必须运行**：
 
 ```bash
-npm run build:assets   # 即 node scripts/stamp-assets.mjs，重写 index.html 中的 ?v=
+npm run build:assets   # 即 node scripts/stamp-assets.mjs，重写 index.html 与 claude/index.html 中的 ?v=（新增页面时把路径加到脚本的 PAGES）
 ```
 
 `npm run dev` / `npm run deploy` 会自动执行；`npm test` 会检查版本号是否最新（`--check`），忘记运行时测试失败。
@@ -338,6 +342,7 @@ npm run build:data     # 即 node scripts/build-data.mjs
 - 默认未接入任何信誉库（IP 黑名单 / 代理库）。使用代理或 VPN 的家宽 IP 仍可能得到高分，页面与 API（`analysis.reputation`）会明确提示；配置 `IPAPI_IS_KEY` / `PROXYCHECK_KEY` / `ABUSEIPDB_KEY` 后才会参考外部信誉数据。
 - 当地理 / ASN 接口全部失败时，结果标记为「数据不完整」（`analysis.incomplete = true`），分数封顶 60、风险至少为「中」，不会误报为“干净”。
 - DNS 泄露检测尚未实现（第二期）。
+- Claude 环境检测的分数是启发式估计，Anthropic 的真实风控规则不公开；支持地区列表为 2026-11-01 抓取的静态副本（页面标注 2026-11-12 生效），官网更新后需手动同步 `claude-rules.js`。`claude.ai` / `my.ip.cn` 的 CORS 行为由对方决定，随时可能变化。
 
 ## 数据来源
 

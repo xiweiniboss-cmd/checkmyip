@@ -1,6 +1,6 @@
 {
   "name": "checkmyip",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "private": true,
   "description": "checkmyip — IP 信息与纯净度检测（Cloudflare Worker + 静态资源）",
   "type": "module",
@@ -12,7 +12,7 @@
     "build:data": "node scripts/build-data.mjs",
     "db:migrate:local": "node scripts/d1-local-config.mjs && wrangler d1 migrations apply checkmyip --local -c wrangler.local-d1.toml",
     "db:migrate:remote": "wrangler d1 migrations apply checkmyip --remote",
-    "test": "node scripts/test-ranges.mjs && node scripts/test-rules.mjs && node scripts/test-sharing.mjs && node scripts/test-seen.mjs && node scripts/test-ratelimit.mjs && node scripts/stamp-assets.mjs --check",
+    "test": "node scripts/test-ranges.mjs && node scripts/test-rules.mjs && node scripts/test-sharing.mjs && node scripts/test-seen.mjs && node scripts/test-ratelimit.mjs && node scripts/test-claude.mjs && node scripts/stamp-assets.mjs --check",
     "test:ranges": "node scripts/test-ranges.mjs",
     "test:rules": "node scripts/test-rules.mjs",
     "test:sharing": "node scripts/test-sharing.mjs",
