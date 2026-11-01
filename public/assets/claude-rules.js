@@ -56,7 +56,7 @@
   // 输入：
   //   claude: { ok, ip, loc, colo, warp, ms }      ← https://claude.ai/cdn-cgi/trace
   //   cf:     { ok, ip, loc } | null               ← https://1.1.1.1/cdn-cgi/trace
-  //   cn:     { ok, ip, location } | null          ← https://my.ip.cn/（国内出口，只在本地对比，不上传）
+  //   cn:     { ok, ip, location } | null          ← https://my.ip.cn/（国内出口，只在本页对比，本页不会主动发给本站）
   //   site:   { ip }                               ← 本站 /api/ip 看到的地址
   //   ipInfo: /api/ip 对 Claude 出口 IP 的结果（analysis.type / score / risk，location.countryCode / timezone）
   //   tz:     { browserOffset, ipOffset, browserTz, ipTz }（分钟，东正西负）

@@ -20,7 +20,7 @@
 | WebRTC 泄露检测 | 通过 `stun.cloudflare.com:3478`、`stun.miwifi.com:3478` 收集候选地址并对比 |
 | 浏览器指纹概览 | UA、屏幕、时区、语言、Canvas、WebGL、字体等，全部在本地计算，不上传 |
 | DNS 泄露检测 | 占位，第二期上线（需要自有权威 DNS） |
-| Claude 环境检测（`/claude/`，v0.4.0） | 浏览器直接请求 `claude.ai` / `1.1.1.1` 的 `/cdn-cgi/trace` 与 `my.ip.cn`，对比 Claude 出口、海外出口、国内出口，判断分流是否生效；按 Anthropic 官方支持地区列表（2026-11-01 抓取）判断出口地区；复用 `/api/ip?ip=` 查询 Claude 出口的网络类型；WebRTC 泄露、时区一致性、claude.ai 延迟；另给出浏览器「中文用户特征」估计分（时区 / 语言 / 区域格式 / UTC+8 / 中文字体，字体低权重）。全部在浏览器本地完成，只有 Claude 出口 IP 会发给本站查询，国内出口 IP 不上传 |
+| Claude 环境检测（`/claude/`，v0.4.0） | 浏览器直接请求 `claude.ai` / `1.1.1.1` 的 `/cdn-cgi/trace` 与 `my.ip.cn`，对比 Claude 出口、海外出口、国内出口，判断分流是否生效；按 Anthropic 官方支持地区列表（2026-11-01 抓取）判断出口地区；复用 `/api/ip?ip=` 查询 Claude 出口的网络类型；WebRTC 泄露、时区一致性、claude.ai 延迟；另给出浏览器「中文用户特征」估计分（时区 / 语言 / 区域格式 / UTC+8 / 中文字体，字体低权重）。浏览器环境只在本地检测；本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 `/api/ip?ip=`（以及本站用的归属地接口与 DNS 反查）查询类型与纯净度，不写 D1、不写日志，结果仅按 IP 在边缘短时缓存（≤6 小时）；本页不调用 `/api/seen`；为了检测，浏览器会访问 claude.ai、1.1.1.1、my.ip.cn 和 `config.js` 里的 STUN 服务器 |
 
 ## 架构
 

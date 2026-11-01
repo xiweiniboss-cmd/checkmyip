@@ -119,5 +119,12 @@ eq('网络好但浏览器像中国用户', R.overall(good, { level: 'bad' }).lev
 eq('都好', R.overall(good, { level: 'good' }).level, 'good');
 eq('网络中等', R.overall(warn, { level: 'warn' }).level, 'warn');
 
+// ---- 隐私说明文案：必须如实说明对外请求，不能写「全部本地 / 不上传任何东西」----
+const page = readFileSync(new URL('../public/claude/index.html', import.meta.url), 'utf8');
+const pageJs = readFileSync(new URL('../public/assets/claude.js', import.meta.url), 'utf8');
+for (const bad of ['全部检测在你的浏览器本地完成', '结果不会上传', '全部在浏览器本地完成', '不上传任何', '不发送给任何服务器', '不发给任何服务器']) ok(`页面不含「${bad}」`, !page.includes(bad));
+for (const must of ['浏览器环境只在本地检测', 'claude.ai', '1.1.1.1', 'my.ip.cn', '/api/ip', 'STUN', '不写入 D1', '最多 6 小时', '本页不会主动把国内出口 IP 发给本站']) ok(`页面说明含「${must}」`, page.includes(must));
+ok('本页不调用 /api/seen', !/fetch\([^)]*api\/seen/.test(pageJs) && !pageJs.includes("'/api/seen'"));
+
 if (fails) { console.error(`\n${fails}/${n} 项失败`); process.exit(1); }
 console.log(`✔ Claude 环境规则测试全部通过（${n} 项）`);

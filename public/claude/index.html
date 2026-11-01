@@ -2,21 +2,21 @@
 <html lang="zh-CN" data-theme="auto">
 <head>
   <meta charset="utf-8">
-  <meta name="checkmyip-asset-version" content="0bf2885a76">
+  <meta name="checkmyip-asset-version" content="a0c2fa37a6">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Claude 环境检测 · checkmyip</title>
-  <meta name="description" content="检测访问 Claude 时的出口 IP、分流是否生效、出口地区是否在 Anthropic 支持列表、IP 类型与 WebRTC 泄露，并估算浏览器的中文用户特征。全部在浏览器本地完成。">
+  <meta name="description" content="检测访问 Claude 时的出口 IP、分流是否生效、出口地区是否在 Anthropic 支持列表、IP 类型与 WebRTC 泄露，并估算浏览器的中文用户特征。浏览器环境只在本地检测。">
   <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/app.css?v=0bf2885a76">
-  <script src="/assets/theme-init.js?v=0bf2885a76"></script>
+  <link rel="stylesheet" href="/assets/app.css?v=a0c2fa37a6">
+  <script src="/assets/theme-init.js?v=a0c2fa37a6"></script>
 </head>
 <body class="page-claude">
   <header class="topbar">
     <div class="wrap topbar-inner">
       <a class="brand" href="/" aria-label="checkmyip 首页">
-        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#logo"/></svg>
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg>
         <span class="brand-name">check<b>my</b>ip</span>
       </a>
       <nav class="nav" aria-label="页面导航">
@@ -27,8 +27,8 @@
         <a href="/claude/" class="nav-claude active" aria-current="page">Claude 检测</a>
       </nav>
       <button class="icon-btn" id="themeBtn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
-        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg?v=0bf2885a76#sun"/></svg>
-        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg?v=0bf2885a76#moon"/></svg>
+        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg?v=a0c2fa37a6#sun"/></svg>
+        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg?v=a0c2fa37a6#moon"/></svg>
       </button>
     </div>
   </header>
@@ -40,14 +40,16 @@
           <h1>Claude 环境检测</h1>
           <p class="sub">看看访问 Claude 时实际用的是哪个出口、分流有没有生效、出口地区是否受支持，以及浏览器暴露了多少「中国用户」特征。</p>
         </div>
-        <button class="btn primary" id="rerunBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=0bf2885a76#refresh"/></svg>重新检测</button>
+        <button class="btn primary" id="rerunBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=a0c2fa37a6#refresh"/></svg>重新检测</button>
       </div>
 
       <div class="privacy-box" role="note">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#ok"/></svg>
-        <div><b>全部检测在你的浏览器本地完成，结果不会上传。</b>
-          浏览器会直接访问 <code>claude.ai/cdn-cgi/trace</code>、<code>1.1.1.1/cdn-cgi/trace</code> 和 <code>my.ip.cn</code> 来获取各条线路的出口 IP。
-          唯一的例外：Claude 出口 IP 会发给本站 <code>/api/ip</code> 查询网络类型与纯净度（与首页「查询 IP」相同，不保存）。国内出口 IP 只在本页对比，不发送给任何服务器。</div>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#ok"/></svg>
+        <div><b>浏览器环境只在本地检测。</b>
+          本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 <code>/api/ip</code>（以及本站用的归属地接口，如 ip.sb、ipwho.is 和 DNS 反查）查询类型与纯净度，
+          不写入数据库、不写日志，查询结果仅按 IP 在 Cloudflare 边缘短时缓存（最多 6 小时）；
+          为了检测，浏览器会访问 <code>claude.ai</code>、<code>1.1.1.1</code>、<code>my.ip.cn</code> 和 STUN 服务器（<code>stun.cloudflare.com</code>、<code>stun.miwifi.com</code>）。
+          页面加载时也会像首页一样查询你访问本站用的 IP：只读取「本站观测」计数，本页不上报指纹、不写入 D1。</div>
       </div>
 
       <div class="verdict loading" id="cvVerdict">
@@ -127,16 +129,16 @@
   <footer class="footer">
     <div class="wrap footer-inner">
       <div>
-        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
+        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
         <p class="muted small">免责声明：本页结果由公开数据和启发式规则推断得出，不代表 Anthropic 的判断，也不构成任何平台风控结论。请遵守 Anthropic 的使用条款与所在地法律。</p>
       </div>
       <p class="muted small"><a href="/">返回首页</a></p>
     </div>
   </footer>
 
-  <script src="/config.js?v=0bf2885a76"></script>
-  <script src="/assets/webrtc.js?v=0bf2885a76"></script>
-  <script src="/assets/claude-rules.js?v=0bf2885a76"></script>
-  <script src="/assets/claude.js?v=0bf2885a76"></script>
+  <script src="/config.js?v=a0c2fa37a6"></script>
+  <script src="/assets/webrtc.js?v=a0c2fa37a6"></script>
+  <script src="/assets/claude-rules.js?v=a0c2fa37a6"></script>
+  <script src="/assets/claude.js?v=a0c2fa37a6"></script>
 </body>
 </html>

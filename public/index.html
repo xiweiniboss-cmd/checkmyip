@@ -2,21 +2,21 @@
 <html lang="zh-CN" data-theme="auto">
 <head>
   <meta charset="utf-8">
-  <meta name="checkmyip-asset-version" content="0bf2885a76">
+  <meta name="checkmyip-asset-version" content="a0c2fa37a6">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>checkmyip · IP 信息与纯净度检测</title>
   <meta name="description" content="查看你的公网 IP、归属地、运营商与 ASN，判断家庭宽带还是机房 IP，检测 WebRTC 泄露与浏览器环境一致性。">
   <meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/app.css?v=0bf2885a76">
-  <script src="/assets/theme-init.js?v=0bf2885a76"></script>
+  <link rel="stylesheet" href="/assets/app.css?v=a0c2fa37a6">
+  <script src="/assets/theme-init.js?v=a0c2fa37a6"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="wrap topbar-inner">
       <a class="brand" href="/" aria-label="checkmyip 首页">
-        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#logo"/></svg>
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg>
         <span class="brand-name">check<b>my</b>ip</span>
       </a>
       <nav class="nav" aria-label="页面导航">
@@ -27,8 +27,8 @@
         <a href="/claude/" class="nav-claude">Claude 检测</a>
       </nav>
       <button class="icon-btn" id="themeBtn" type="button" title="切换深色 / 浅色" aria-label="切换主题">
-        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg?v=0bf2885a76#sun"/></svg>
-        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg?v=0bf2885a76#moon"/></svg>
+        <svg viewBox="0 0 24 24" class="i-sun"><use href="/assets/icons.svg?v=a0c2fa37a6#sun"/></svg>
+        <svg viewBox="0 0 24 24" class="i-moon"><use href="/assets/icons.svg?v=a0c2fa37a6#moon"/></svg>
       </button>
     </div>
   </header>
@@ -42,7 +42,7 @@
           <p class="sub">查看本站看到的公网 IP、归属地与运营商，判断是家庭宽带还是机房 IP，并给出纯净度参考评分。</p>
         </div>
         <form class="search" id="searchForm" autocomplete="off">
-          <svg viewBox="0 0 24 24" class="search-ico" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#search"/></svg>
+          <svg viewBox="0 0 24 24" class="search-ico" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#search"/></svg>
           <input id="searchInput" name="ip" type="text" inputmode="text" spellcheck="false" placeholder="输入 IPv4 / IPv6 地址查询，例如 8.8.8.8" aria-label="要查询的 IP 地址">
           <button class="btn primary" type="submit">查询</button>
           <button class="btn ghost" type="button" id="mineBtn" hidden>我的 IP</button>
@@ -57,7 +57,7 @@
           </div>
           <div class="ip-line">
             <span class="ip-value skel" id="ipValue">000.000.000.000</span>
-            <button class="icon-btn sm" id="copyBtn" type="button" title="复制 IP" aria-label="复制 IP"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=0bf2885a76#copy"/></svg></button>
+            <button class="icon-btn sm" id="copyBtn" type="button" title="复制 IP" aria-label="复制 IP"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=a0c2fa37a6#copy"/></svg></button>
           </div>
           <div class="badges" id="ipBadges"><span class="badge skel">加载中</span></div>
           <dl class="kv" id="ipKv">
@@ -121,7 +121,7 @@
 
         <article class="card sharing-card" id="sharingCard" aria-live="polite">
           <div class="card-head">
-            <span class="eyebrow"><svg class="eyebrow-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#users"/></svg>预估多少人在用这个 IP</span>
+            <span class="eyebrow"><svg class="eyebrow-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#users"/></svg>预估多少人在用这个 IP</span>
             <span class="hint-tag" title="根据 IP 类型推测，不是实际统计">估算</span>
           </div>
           <div class="sharing-body">
@@ -157,7 +157,7 @@
           <h2>WebRTC 泄露检测</h2>
           <p class="sub">网页可以通过 WebRTC 向 STUN 服务器探测你的真实地址。如果这里出现了与上方不同的公网 IP，说明代理 / VPN 可能被绕过。</p>
         </div>
-        <button class="btn" id="rtcBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=0bf2885a76#refresh"/></svg>重新检测</button>
+        <button class="btn" id="rtcBtn" type="button"><svg viewBox="0 0 24 24"><use href="/assets/icons.svg?v=a0c2fa37a6#refresh"/></svg>重新检测</button>
       </div>
       <article class="card">
         <div class="verdict" id="rtcVerdict"><span class="verdict-ico"></span><div><b>正在检测…</b><p>正在通过 STUN 服务器收集候选地址，通常需要 2–6 秒。</p></div></div>
@@ -187,7 +187,7 @@
     <section id="dns" class="section">
       <div class="section-head"><div><h2>DNS 泄露检测</h2><p class="sub">检测你的 DNS 查询实际由哪些解析服务器发出，判断是否绕过了代理。</p></div></div>
       <article class="card coming">
-        <svg viewBox="0 0 24 24" class="coming-ico"><use href="/assets/icons.svg?v=0bf2885a76#dns"/></svg>
+        <svg viewBox="0 0 24 24" class="coming-ico"><use href="/assets/icons.svg?v=a0c2fa37a6#dns"/></svg>
         <div>
           <b>第二期上线</b>
           <p>DNS 泄露检测需要本站自有域名和权威 DNS 服务器来记录解析来源，目前正在准备中。</p>
@@ -200,7 +200,7 @@
   <footer class="footer">
     <div class="wrap footer-inner">
       <div>
-        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=0bf2885a76#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
+        <div class="brand small"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><use href="/assets/icons.svg?v=a0c2fa37a6#logo"/></svg><span class="brand-name">check<b>my</b>ip</span></div>
         <p class="muted small">免责声明：本站结果由公开数据和规则推断得出，可能存在误差，仅供参考，不构成任何平台风控结论。查询其他 IP 时会调用第三方公共接口获取归属地。</p>
       </div>
       <p class="muted small" id="dataMeta">数据更新：—</p>
@@ -208,9 +208,9 @@
   </footer>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/config.js?v=0bf2885a76"></script>
-  <script src="/assets/fp.js?v=0bf2885a76"></script>
-  <script src="/assets/webrtc.js?v=0bf2885a76"></script>
-  <script src="/assets/app.js?v=0bf2885a76"></script>
+  <script src="/config.js?v=a0c2fa37a6"></script>
+  <script src="/assets/fp.js?v=a0c2fa37a6"></script>
+  <script src="/assets/webrtc.js?v=a0c2fa37a6"></script>
+  <script src="/assets/app.js?v=a0c2fa37a6"></script>
 </body>
 </html>

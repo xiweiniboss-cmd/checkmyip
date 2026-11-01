@@ -1,6 +1,6 @@
-// Claude 环境检测页：所有检测在浏览器本地完成。
+// Claude 环境检测页：浏览器环境只在本地检测；出口检测由浏览器直接访问 claude.ai / 1.1.1.1 / my.ip.cn。
 // 外部请求：claude.ai / 1.1.1.1 / api.anthropic.com 的 /cdn-cgi/trace（CORS *）、my.ip.cn（CORS *）、STUN。
-// 发给本站的只有：/api/ip（自己的 IP）与 /api/ip?ip=<Claude 出口 IP>。国内出口 IP 永不上传。
+// 发给本站的只有：/api/ip（自己的 IP）与 /api/ip?ip=<Claude 出口 IP>。本页不会主动把国内出口 IP 发给本站；不调用 /api/seen。
 (function () {
   'use strict';
   const R = window.CMIClaudeRules;
@@ -122,7 +122,7 @@
     $('#exitList').innerHTML = [
       exitRow('Claude', `访问 claude.ai 时的出口${colo(s.claude)}${s.claude && s.claude.warp === 'on' ? ' · WARP' : ''}`, s.claude, cTag),
       exitRow('海外', `访问 1.1.1.1 时的出口${colo(s.cf)}`, s.cf),
-      exitRow('国内', '访问 my.ip.cn 时的出口（只在本地显示）', s.cn),
+      exitRow('国内', '访问 my.ip.cn 时的出口（只在本页显示）', s.cn),
       exitRow('本站', '访问 checkmyip 时的出口', s.site ? { ok: true, ip: s.site.ip, loc: s.site.location && s.site.location.countryCode } : s.siteErr ? { ok: false, error: s.siteErr } : null),
     ].join('');
   }
