@@ -20,7 +20,7 @@
 | WebRTC 泄露检测 | 通过 `stun.cloudflare.com:3478`、`stun.miwifi.com:3478` 收集候选地址并对比 |
 | 浏览器指纹概览 | UA、屏幕、时区、语言、Canvas、WebGL、字体等，全部在本地计算，不上传 |
 | DNS 泄露检测 | 占位，第二期上线（需要自有权威 DNS） |
-| Claude 环境检测（`/claude/`，v0.4.0） | 浏览器直接请求 `claude.ai` / `1.1.1.1` 的 `/cdn-cgi/trace` 与 `my.ip.cn`，对比 Claude 出口、海外出口、国内出口，判断分流是否生效；按 Anthropic 官方支持地区列表（2026-11-01 抓取）判断出口地区；复用 `/api/ip?ip=` 查询 Claude 出口的网络类型；WebRTC 泄露、时区一致性、claude.ai 延迟；另给出浏览器「中文用户特征」估计分（时区 / 语言 / 区域格式 / UTC+8 / 中文字体，字体低权重）。浏览器环境只在本地检测；本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 `/api/ip?ip=`（以及本站用的归属地接口与 DNS 反查）查询类型与纯净度，不写 D1、不写日志，结果仅按 IP 在边缘短时缓存（≤6 小时）；本页不调用 `/api/seen`；为了检测，浏览器会访问 claude.ai、1.1.1.1、my.ip.cn 和 `config.js` 里的 STUN 服务器 |
+| Claude 环境检测（`/claude/`，v0.4.0；v0.4.1 起不再在页面列出支持地区，只给官方链接） | 浏览器直接请求 `claude.ai` / `1.1.1.1` 的 `/cdn-cgi/trace` 与 `my.ip.cn`，对比 Claude 出口、海外出口、国内出口，判断分流是否生效；按内置的 Anthropic 官方支持地区列表（2026-11-01 抓取，仅用于判断，不在页面展示；页面提供[官方页面](https://www.anthropic.com/supported-countries)链接）判断出口地区；复用 `/api/ip?ip=` 查询 Claude 出口的网络类型；WebRTC 泄露、时区一致性、claude.ai 延迟；另给出浏览器「中文用户特征」估计分（时区 / 语言 / 区域格式 / UTC+8 / 中文字体，字体低权重）。浏览器环境只在本地检测；本页不会主动把国内出口 IP 发给本站；Claude 出口 IP 会经本站 `/api/ip?ip=`（以及本站用的归属地接口与 DNS 反查）查询类型与纯净度，不写 D1、不写日志，结果仅按 IP 在边缘短时缓存（≤6 小时）；本页不调用 `/api/seen`；为了检测，浏览器会访问 claude.ai、1.1.1.1、my.ip.cn 和 `config.js` 里的 STUN 服务器 |
 
 ## 架构
 
@@ -342,7 +342,7 @@ npm run build:data     # 即 node scripts/build-data.mjs
 - 默认未接入任何信誉库（IP 黑名单 / 代理库）。使用代理或 VPN 的家宽 IP 仍可能得到高分，页面与 API（`analysis.reputation`）会明确提示；配置 `IPAPI_IS_KEY` / `PROXYCHECK_KEY` / `ABUSEIPDB_KEY` 后才会参考外部信誉数据。
 - 当地理 / ASN 接口全部失败时，结果标记为「数据不完整」（`analysis.incomplete = true`），分数封顶 60、风险至少为「中」，不会误报为“干净”。
 - DNS 泄露检测尚未实现（第二期）。
-- Claude 环境检测的分数是启发式估计，Anthropic 的真实风控规则不公开；支持地区列表为 2026-11-01 抓取的静态副本（页面标注 2026-11-12 生效），官网更新后需手动同步 `claude-rules.js`。`claude.ai` / `my.ip.cn` 的 CORS 行为由对方决定，随时可能变化。
+- Claude 环境检测的分数是启发式估计，Anthropic 的真实风控规则不公开；支持地区列表为 2026-11-01 抓取的静态副本（官网标注 2026-11-12 生效），只用于「出口地区」判断、页面只链接官网；官网更新后需手动同步 `claude-rules.js`。`claude.ai` / `my.ip.cn` 的 CORS 行为由对方决定，随时可能变化。
 
 ## 数据来源
 

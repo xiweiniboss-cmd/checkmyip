@@ -151,12 +151,6 @@
     $('#cvVerdictText').textContent = v.text;
   }
 
-  function renderRegions() {
-    const list = [...R.SUPPORTED].map((cc) => ({ cc, name: regionName(cc) })).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-    $('#regionCount').textContent = list.length;
-    $('#regionList').innerHTML = list.map((x) => `<span class="badge soft" title="${x.cc}">${esc(x.name)} <small>${x.cc}</small></span>`).join('');
-  }
-
   // ---------- 主流程 ----------
   let running = false;
   async function run() {
@@ -199,6 +193,5 @@
   }
 
   $('#rerunBtn').addEventListener('click', run);
-  renderRegions();
   run();
 })();

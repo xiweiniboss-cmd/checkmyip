@@ -82,11 +82,11 @@
     let cap = 100;
     if (rs.status === 'unsupported') {
       cap = 10;
-      add('region', 'bad', `出口地区不在支持列表：${cc}`, `按 ${ccSrc}，Claude 出口位于 ${cc}，不在 Anthropic 官方支持的国家 / 地区列表内，注册与使用都可能被拒绝或封号。`, -90);
+      add('region', 'bad', `出口地区不在支持列表：${cc}`, `按 ${ccSrc}，Claude 出口位于 ${cc}，不在 Anthropic 官方支持的国家 / 地区列表内（${SUPPORTED_REGIONS_SOURCE.fetchedAt} 抓取，见下方官方链接），注册与使用都可能被拒绝或封号。`, -90);
     } else if (rs.status === 'partial') {
       add('region', 'warn', `出口地区：${cc}（部分支持）`, '乌克兰的克里米亚、顿涅茨克、赫尔松、卢甘斯克、扎波罗热地区不受支持，本站无法精确判断到州。', -10);
     } else if (rs.status === 'supported') {
-      add('region', 'good', `出口地区受支持：${cc}${rs.via ? `（属 ${rs.via}）` : ''}`, `按 ${ccSrc} 判断，位于 Anthropic 官方支持列表内。`);
+      add('region', 'good', `出口地区受支持：${cc}${rs.via ? `（属 ${rs.via}）` : ''}`, `按 ${ccSrc} 判断，位于 Anthropic 官方支持列表内（${SUPPORTED_REGIONS_SOURCE.fetchedAt} 抓取，以官网为准）。`);
     } else {
       add('region', 'warn', '无法判断出口地区', rs.tor ? 'Cloudflare 将该出口标记为 Tor（T1），Claude 基本不可用。' : '没有拿到出口国家代码。', rs.tor ? -60 : -15);
       if (rs.tor) cap = Math.min(cap, 20);

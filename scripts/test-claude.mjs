@@ -126,5 +126,19 @@ for (const bad of ['全部检测在你的浏览器本地完成', '结果不会�
 for (const must of ['浏览器环境只在本地检测', 'claude.ai', '1.1.1.1', 'my.ip.cn', '/api/ip', 'STUN', '不写入 D1', '最多 6 小时', '本页不会主动把国内出口 IP 发给本站']) ok(`页面说明含「${must}」`, page.includes(must));
 ok('本页不调用 /api/seen', !/fetch\([^)]*api\/seen/.test(pageJs) && !pageJs.includes("'/api/seen'"));
 
+// ---- v0.4.1：支持地区只给官方链接，不在页面列出 ----
+const css = readFileSync(new URL('../public/assets/app.css', import.meta.url), 'utf8');
+for (const gone of ['id="regionList"', 'id="regionCount"', 'id="regions"', '<details']) ok(`页面不再含 ${gone}`, !page.includes(gone));
+ok('页面脚本不再渲染地区列表', !pageJs.includes('regionList') && !pageJs.includes('renderRegions') && !pageJs.includes('R.SUPPORTED'));
+ok('CSS 去掉 .region-list', !css.includes('.region-list'));
+const link = page.match(/<a href="([^"]+)"([^>]*)>查看 Anthropic 官方支持的国家\/地区 ↗<\/a>/);
+ok('有官方支持地区链接', link);
+eq('链接与代码引用的官方地址一致', link && link[1], R.SUPPORTED_REGIONS_SOURCE.url);
+ok('链接新标签页打开', link && /target="_blank"/.test(link[2]) && /rel="noopener noreferrer"/.test(link[2]));
+eq('页面只有一个官方链接', (page.match(/anthropic\.com\/supported-countries/g) || []).length, 1);
+ok('页面没有列出国家名（抽查）', !/>(阿富汗|津巴布韦|Zimbabwe)</.test(page));
+{ const r = R.scoreNetwork({ claude: { ok: true, ip: '85.195.230.77', loc: 'CH' }, cf: null, cn: null, site: null, ipInfo: null, tz: null, rtc: null });
+  ok('地区项说明带抓取日期', item(r, 'region').detail.includes('2026-11-01')); }
+
 if (fails) { console.error(`\n${fails}/${n} 项失败`); process.exit(1); }
 console.log(`✔ Claude 环境规则测试全部通过（${n} 项）`);
